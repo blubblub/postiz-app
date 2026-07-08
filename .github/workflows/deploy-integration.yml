@@ -68,10 +68,24 @@ jobs:
           SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
           GHCR_TOKEN: ${{ github.token }}
           SHA_TAG: ${{ needs.build.outputs.sha_tag }}
+        # The deploy runs detached on the droplet; we poll over fresh SSH
+        # connections so a dropped connection can't kill a deploy mid-flight.
         run: |
           mkdir -p ~/.ssh
           printf '%s\n' "$SSH_KEY" > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
           echo "165.245.254.117 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIC5xuP9g97LVUQS3prqQae+1tizU5KlHYdnVrNsxttGx" >> ~/.ssh/known_hosts
-          ssh -i ~/.ssh/deploy_key -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
-            root@165.245.254.117 "$SHA_TAG $GHCR_TOKEN"
+          SSH="ssh -i $HOME/.ssh/deploy_key -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=4 root@165.245.254.117"
+          $SSH "start $SHA_TAG $GHCR_TOKEN"
+          echo "deploy started on droplet; polling status..."
+          for i in $(seq 1 60); do
+            sleep 15
+            rc=0; OUT=$($SSH "status" 2>&1) || rc=$?
+            echo "[poll $i] $(echo "$OUT" | tail -n 1)"
+            if echo "$OUT" | grep -q "^DONE"; then
+              echo "$OUT"
+              exit "$rc"
+            fi
+          done
+          echo "TIMEOUT: deploy did not report DONE within 15 minutes"
+          exit 1
