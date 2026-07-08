@@ -295,13 +295,21 @@ export const SocialComments = () => {
     [integrations]
   );
 
+  const activeIntegrations = useMemo(
+    () =>
+      sortedIntegrations.filter(
+        (integration) => !integration.disabled && !integration.refreshNeeded
+      ),
+    [sortedIntegrations]
+  );
+
   const currentIntegration = useMemo(() => {
     return (
-      sortedIntegrations.find(
+      activeIntegrations.find(
         (integration) => integration.id === currentIntegrationId
-      ) || sortedIntegrations[0]
+      ) || activeIntegrations[0]
     );
-  }, [currentIntegrationId, sortedIntegrations]);
+  }, [activeIntegrations, currentIntegrationId]);
 
   useEffect(() => {
     setSelectedPostId('');
@@ -534,12 +542,32 @@ export const SocialComments = () => {
         </div>
         <div className="text-[16px] text-textColor/70">
           {t(
-            'connect_facebook_or_instagram',
-            'Connect Facebook or Instagram to browse comments.'
+            'connect_comment_channel',
+            'Connect Facebook, Instagram, or TikTok Business to browse comments.'
           )}
         </div>
         <Button onClick={() => router.push('/third-party')}>
           {t('connect_channel', 'Connect channel')}
+        </Button>
+      </div>
+    );
+  }
+
+  if (!activeIntegrations.length) {
+    return (
+      <div className="flex flex-1 flex-col items-center justify-center gap-[15px] bg-newBgColorInner p-[20px] text-center">
+        <img src="/peoplemarketplace.svg" alt="" />
+        <div className="text-[36px] font-[500]">
+          {t('no_active_comment_channels', 'No active comment channels')}
+        </div>
+        <div className="text-[16px] text-textColor/70">
+          {t(
+            'reconnect_or_enable_comment_channel',
+            'Reconnect or enable a comment channel to browse comments.'
+          )}
+        </div>
+        <Button onClick={() => router.push('/third-party')}>
+          {t('manage_channels', 'Manage channels')}
         </Button>
       </div>
     );
@@ -656,7 +684,7 @@ export const SocialComments = () => {
           )}
           {!postsLoading && !postsError && !posts.length && (
             <div className="rounded-[8px] bg-third p-[14px] text-[14px] text-textColor/70">
-              {t('no_meta_posts_with_comments', 'No Meta posts found yet.')}
+              {t('no_posts_with_comments', 'No posts found yet.')}
             </div>
           )}
           <div
@@ -703,6 +731,15 @@ export const SocialComments = () => {
               <div className="flex justify-center py-[12px]">
                 <LoadingComponent />
               </div>
+            )}
+            {!!nextPostCursor && !loadingMorePosts && (
+              <button
+                type="button"
+                onClick={loadMorePosts}
+                className="rounded-[8px] border border-tableBorder bg-newBgColorInner px-[12px] py-[10px] text-[13px] font-[500] text-textColor hover:bg-boxHover"
+              >
+                {t('load_more', 'Load more')}
+              </button>
             )}
           </div>
         </div>
@@ -765,7 +802,13 @@ export const SocialComments = () => {
               </div>
             )}
             {!!nextCommentCursor && !loadingMoreComments && (
-              <div className="h-[1px]" />
+              <button
+                type="button"
+                onClick={loadMoreComments}
+                className="rounded-[8px] border border-tableBorder bg-newBgColorInner px-[12px] py-[10px] text-[13px] font-[500] text-textColor hover:bg-boxHover"
+              >
+                {t('load_more', 'Load more')}
+              </button>
             )}
           </div>
         </div>

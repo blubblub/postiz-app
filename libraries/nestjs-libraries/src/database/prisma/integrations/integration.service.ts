@@ -167,6 +167,15 @@ export class IntegrationService {
     return this._integrationRepository.getIntegrationById(org, id);
   }
 
+  private assertCommentIntegrationEnabled(integration: Integration) {
+    if (integration.disabled || integration.refreshNeeded) {
+      throw new HttpException(
+        'Integration is disabled or needs to be reconnected',
+        HttpStatus.BAD_REQUEST
+      );
+    }
+  }
+
   async refreshToken(provider: SocialProvider, refresh: string) {
     try {
       const { refreshToken, accessToken, expiresIn } =
@@ -419,6 +428,8 @@ export class IntegrationService {
       throw new HttpException('Invalid integration', HttpStatus.NOT_FOUND);
     }
 
+    this.assertCommentIntegrationEnabled(getIntegration);
+
     if (getIntegration.type !== 'social') {
       throw new HttpException(
         'Comments are only available for social integrations',
@@ -488,6 +499,8 @@ export class IntegrationService {
     if (!getIntegration) {
       throw new HttpException('Invalid integration', HttpStatus.NOT_FOUND);
     }
+
+    this.assertCommentIntegrationEnabled(getIntegration);
 
     if (getIntegration.type !== 'social') {
       throw new HttpException(
@@ -574,6 +587,8 @@ export class IntegrationService {
     if (!getIntegration) {
       throw new HttpException('Invalid integration', HttpStatus.NOT_FOUND);
     }
+
+    this.assertCommentIntegrationEnabled(getIntegration);
 
     if (getIntegration.type !== 'social') {
       throw new HttpException(
@@ -684,6 +699,8 @@ export class IntegrationService {
     if (!getIntegration) {
       throw new HttpException('Invalid integration', HttpStatus.NOT_FOUND);
     }
+
+    this.assertCommentIntegrationEnabled(getIntegration);
 
     if (getIntegration.type !== 'social') {
       throw new HttpException(
