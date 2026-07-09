@@ -3,6 +3,9 @@ import {
   AuthTokenDetails,
   PostDetails,
   PostResponse,
+  SocialComment,
+  SocialCommentPostsPage,
+  SocialCommentsPage,
   SocialProvider,
 } from '@gitroom/nestjs-libraries/integrations/social/social.integrations.interface';
 import { makeId } from '@gitroom/nestjs-libraries/services/make.is';
@@ -113,7 +116,7 @@ export class FacebookProvider extends SocialAbstract implements SocialProvider {
       return {
         type: 'bad-body' as const,
         value: 'Invalid file',
-      }
+      };
     }
 
     if (body.indexOf('1404102') > -1) {
@@ -753,6 +756,152 @@ export class FacebookProvider extends SocialAbstract implements SocialProvider {
         status: 'success',
       },
     ];
+  }
+
+  async fetchComments(
+    id: string,
+    accessToken: string,
+    postId: string,
+    integration: Integration,
+    cursor?: string
+  ): Promise<SocialCommentsPage> {
+    const fields = [
+      'id',
+      'message',
+      'from{name,id}',
+      'created_time',
+      'like_count',
+      'is_hidden',
+      'comment_count',
+      'permalink_url',
+      'comments.limit(25){id,message,from{name,id},created_time,like_count,is_hidden,comment_count,permalink_url}',
+    ].join(',');
+    const params = new URLSearchParams({
+      access_token: accessToken,
+      fields,
+      limit: '100',
+    });
+
+    if (cursor) {
+      params.set('after', cursor);
+    }
+
+    const response = await (
+      await this.fetch(
+        `https://graph.facebook.com/v20.0/${postId}/comments?${params.toString()}`,
+        {},
+        'fetch comments'
+      )
+    ).json();
+
+    const normalize = (comment: any): SocialComment => ({
+      id: String(comment.id),
+      text: comment.message || '',
+      username: comment.from?.name,
+      timestamp: comment.created_time,
+      likeCount: Number(comment.like_count || 0),
+      hidden: comment.is_hidden ?? comment.hidden,
+      replies: (comment.comments?.data || []).map(normalize),
+    });
+
+    return {
+      comments: (response.data || []).map(normalize),
+      next: response.paging?.next ? response.paging?.cursors?.after : undefined,
+    };
+  }
+
+  async replyToComment(
+    _id: string,
+    _postId: string,
+    commentId: string,
+    accessToken: string,
+    message: string,
+    _integration: Integration
+  ): Promise<{ id: string }> {
+    const data = await (
+      await this.fetch(
+        `https://graph.facebook.com/v20.0/${commentId}/comments?access_token=${accessToken}&fields=id`,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ message }),
+        },
+        'reply to comment'
+      )
+    ).json();
+
+    return { id: String(data.id) };
+  }
+
+  async hideComment(
+    _id: string,
+    _postId: string,
+    commentId: string,
+    accessToken: string,
+    hidden: boolean,
+    _integration: Integration
+  ): Promise<{ id: string; hidden: boolean }> {
+    await (
+      await this.fetch(
+        `https://graph.facebook.com/v20.0/${commentId}?access_token=${accessToken}`,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ is_hidden: hidden }),
+        },
+        'hide comment'
+      )
+    ).json();
+
+    return { id: String(commentId), hidden };
+  }
+
+  async fetchCommentPosts(
+    id: string,
+    accessToken: string,
+    integration: Integration,
+    limit = 25,
+    cursor?: string
+  ): Promise<SocialCommentPostsPage> {
+    const safeLimit = Math.min(Math.max(Number(limit) || 25, 1), 100);
+    const params = new URLSearchParams({
+      access_token: accessToken,
+      fields:
+        'id,message,story,created_time,permalink_url,comments.limit(0).summary(true),likes.limit(0).summary(true)',
+      limit: String(safeLimit),
+    });
+    if (cursor) {
+      params.set('after', cursor);
+    }
+    const response = await (
+      await this.fetch(
+        `https://graph.facebook.com/v20.0/${id}/posts?${params.toString()}`,
+        {},
+        'fetch comment posts'
+      )
+    ).json();
+    const posts = (response.data || []).map((post: any) => ({
+      id: String(post.id),
+      releaseId: String(post.id),
+      releaseURL: post.permalink_url,
+      content: post.message || post.story || 'Facebook post',
+      publishDate: post.created_time,
+      commentCount: Number(post.comments?.summary?.total_count || 0),
+      likeCount: Number(post.likes?.summary?.total_count || 0),
+    }));
+
+    return {
+      posts,
+      total: posts.length,
+      page: 0,
+      limit: safeLimit,
+      hasMore: !!response.paging?.next,
+      next: response.paging?.next ? response.paging?.cursors?.after : undefined,
+    };
   }
 
   async analytics(

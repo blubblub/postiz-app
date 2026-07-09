@@ -9,6 +9,8 @@ import { IntegrationRepository } from '@gitroom/nestjs-libraries/database/prisma
 import { IntegrationManager } from '@gitroom/nestjs-libraries/integrations/integration.manager';
 import {
   AnalyticsData,
+  SocialCommentPostsPage,
+  SocialCommentsPage,
   SocialProvider,
 } from '@gitroom/nestjs-libraries/integrations/social/social.integrations.interface';
 import { Integration, Organization } from '@prisma/client';
@@ -163,6 +165,15 @@ export class IntegrationService {
 
   getIntegrationById(org: string, id: string) {
     return this._integrationRepository.getIntegrationById(org, id);
+  }
+
+  private assertCommentIntegrationEnabled(integration: Integration) {
+    if (integration.disabled || integration.refreshNeeded) {
+      throw new HttpException(
+        'Integration is disabled or needs to be reconnected',
+        HttpStatus.BAD_REQUEST
+      );
+    }
   }
 
   async refreshToken(provider: SocialProvider, refresh: string) {
@@ -402,6 +413,358 @@ export class IntegrationService {
     }
 
     return [];
+  }
+
+  async fetchCommentPosts(
+    orgId: string,
+    integration: string,
+    limit = 25,
+    cursor?: string,
+    forceRefresh = false
+  ): Promise<SocialCommentPostsPage> {
+    const getIntegration = await this.getIntegrationById(orgId, integration);
+
+    if (!getIntegration) {
+      throw new HttpException('Invalid integration', HttpStatus.NOT_FOUND);
+    }
+
+    this.assertCommentIntegrationEnabled(getIntegration);
+
+    if (getIntegration.type !== 'social') {
+      throw new HttpException(
+        'Comments are only available for social integrations',
+        HttpStatus.BAD_REQUEST
+      );
+    }
+
+    const integrationProvider = this._integrationManager.getSocialIntegration(
+      getIntegration.providerIdentifier
+    );
+
+    if (!integrationProvider.fetchCommentPosts) {
+      throw new HttpException(
+        'Comments are not supported for this integration',
+        HttpStatus.BAD_REQUEST
+      );
+    }
+
+    if (
+      dayjs(getIntegration?.tokenExpiration).isBefore(dayjs()) ||
+      getIntegration.refreshNeeded ||
+      forceRefresh
+    ) {
+      const data = await this._refreshIntegrationService.refresh(
+        getIntegration,
+        'fetch comment posts'
+      );
+      if (!data || !data.accessToken) {
+        throw new HttpException(
+          'Integration needs to be reconnected',
+          HttpStatus.UNAUTHORIZED
+        );
+      }
+
+      getIntegration.token = data.accessToken;
+
+      if (integrationProvider.refreshWait) {
+        await timer(10000);
+      }
+    }
+
+    try {
+      return await integrationProvider.fetchCommentPosts(
+        getIntegration.internalId,
+        getIntegration.token,
+        getIntegration,
+        limit,
+        cursor
+      );
+    } catch (e) {
+      if (e instanceof RefreshToken && !forceRefresh) {
+        return this.fetchCommentPosts(orgId, integration, limit, cursor, true);
+      }
+      throw e;
+    }
+  }
+
+  async fetchPostComments(
+    orgId: string,
+    integration: string,
+    postId: string,
+    cursor?: string,
+    forceRefresh = false
+  ): Promise<SocialCommentsPage> {
+    const getIntegration = await this.getIntegrationById(orgId, integration);
+
+    if (!getIntegration) {
+      throw new HttpException('Invalid integration', HttpStatus.NOT_FOUND);
+    }
+
+    this.assertCommentIntegrationEnabled(getIntegration);
+
+    if (getIntegration.type !== 'social') {
+      throw new HttpException(
+        'Comments are only available for social integrations',
+        HttpStatus.BAD_REQUEST
+      );
+    }
+
+    const integrationProvider = this._integrationManager.getSocialIntegration(
+      getIntegration.providerIdentifier
+    );
+
+    if (!integrationProvider.fetchComments) {
+      throw new HttpException(
+        'Comments are not supported for this integration',
+        HttpStatus.BAD_REQUEST
+      );
+    }
+
+    if (
+      dayjs(getIntegration?.tokenExpiration).isBefore(dayjs()) ||
+      getIntegration.refreshNeeded ||
+      forceRefresh
+    ) {
+      const data = await this._refreshIntegrationService.refresh(
+        getIntegration,
+        'fetch comments'
+      );
+      if (!data || !data.accessToken) {
+        throw new HttpException(
+          'Integration needs to be reconnected',
+          HttpStatus.UNAUTHORIZED
+        );
+      }
+
+      getIntegration.token = data.accessToken;
+
+      if (integrationProvider.refreshWait) {
+        await timer(10000);
+      }
+    }
+
+    try {
+      return await integrationProvider.fetchComments(
+        getIntegration.internalId,
+        getIntegration.token,
+        postId,
+        getIntegration,
+        cursor
+      );
+    } catch (e) {
+      if (e instanceof RefreshToken && !forceRefresh) {
+        return this.fetchPostComments(orgId, integration, postId, cursor, true);
+      }
+      throw e;
+    }
+  }
+
+  async replyToComment(
+    orgId: string,
+    integration: string,
+    postId: string,
+    parentCommentId: string,
+    message: string,
+    forceRefresh = false
+  ): Promise<{ id: string }> {
+    const cleanMessage = typeof message === 'string' ? message.trim() : '';
+    const cleanParentCommentId =
+      typeof parentCommentId === 'string' ? parentCommentId.trim() : '';
+
+    if (!cleanMessage) {
+      throw new HttpException('Message is required', HttpStatus.BAD_REQUEST);
+    }
+
+    if (!cleanParentCommentId) {
+      throw new HttpException(
+        'Parent comment id is required',
+        HttpStatus.BAD_REQUEST
+      );
+    }
+
+    const getIntegration = await this.getIntegrationById(orgId, integration);
+
+    if (!getIntegration) {
+      throw new HttpException('Invalid integration', HttpStatus.NOT_FOUND);
+    }
+
+    this.assertCommentIntegrationEnabled(getIntegration);
+
+    if (getIntegration.type !== 'social') {
+      throw new HttpException(
+        'Comments are only available for social integrations',
+        HttpStatus.BAD_REQUEST
+      );
+    }
+
+    const integrationProvider = this._integrationManager.getSocialIntegration(
+      getIntegration.providerIdentifier
+    );
+
+    if (
+      !integrationProvider.fetchComments ||
+      !integrationProvider.replyToComment
+    ) {
+      throw new HttpException(
+        'Comment replies are not supported for this integration',
+        HttpStatus.BAD_REQUEST
+      );
+    }
+
+    const maxLength = Number(integrationProvider.maxLength?.());
+    if (
+      Number.isFinite(maxLength) &&
+      maxLength > 0 &&
+      cleanMessage.length > maxLength
+    ) {
+      throw new HttpException(
+        `Message must be ${maxLength} characters or less`,
+        HttpStatus.BAD_REQUEST
+      );
+    }
+
+    if (
+      dayjs(getIntegration?.tokenExpiration).isBefore(dayjs()) ||
+      getIntegration.refreshNeeded ||
+      forceRefresh
+    ) {
+      const data = await this._refreshIntegrationService.refresh(
+        getIntegration,
+        'reply to comment'
+      );
+      if (!data || !data.accessToken) {
+        throw new HttpException(
+          'Integration needs to be reconnected',
+          HttpStatus.UNAUTHORIZED
+        );
+      }
+
+      getIntegration.token = data.accessToken;
+
+      if (integrationProvider.refreshWait) {
+        await timer(10000);
+      }
+    }
+
+    try {
+      // Reply directly and let the platform validate the parent when the reply
+      // is posted. The previous pre-scan paged through every comment (and, for
+      // providers that fetch nested replies per comment, fired an extra request
+      // per comment) only to re-check existence/hidden state that the platform
+      // enforces anyway — and its top-level-only lookup could never resolve a
+      // nested reply's id, so replying to a reply always failed. On failure the
+      // provider surfaces the platform error (RefreshToken retried below).
+      const reply = await integrationProvider.replyToComment(
+        getIntegration.internalId,
+        postId,
+        cleanParentCommentId,
+        getIntegration.token,
+        cleanMessage,
+        getIntegration
+      );
+
+      return { id: String(reply.id) };
+    } catch (e) {
+      if (e instanceof RefreshToken && !forceRefresh) {
+        return this.replyToComment(
+          orgId,
+          integration,
+          postId,
+          cleanParentCommentId,
+          cleanMessage,
+          true
+        );
+      }
+      throw e;
+    }
+  }
+
+  async hideComment(
+    orgId: string,
+    integration: string,
+    postId: string,
+    commentId: string,
+    hidden: boolean,
+    forceRefresh = false
+  ): Promise<{ id: string; hidden: boolean }> {
+    const cleanCommentId =
+      typeof commentId === 'string' ? commentId.trim() : '';
+
+    if (!cleanCommentId) {
+      throw new HttpException('Comment id is required', HttpStatus.BAD_REQUEST);
+    }
+
+    const getIntegration = await this.getIntegrationById(orgId, integration);
+
+    if (!getIntegration) {
+      throw new HttpException('Invalid integration', HttpStatus.NOT_FOUND);
+    }
+
+    this.assertCommentIntegrationEnabled(getIntegration);
+
+    if (getIntegration.type !== 'social') {
+      throw new HttpException(
+        'Comments are only available for social integrations',
+        HttpStatus.BAD_REQUEST
+      );
+    }
+
+    const integrationProvider = this._integrationManager.getSocialIntegration(
+      getIntegration.providerIdentifier
+    );
+
+    if (!integrationProvider.hideComment) {
+      throw new HttpException(
+        'Hiding comments is not supported for this integration',
+        HttpStatus.BAD_REQUEST
+      );
+    }
+
+    if (
+      dayjs(getIntegration?.tokenExpiration).isBefore(dayjs()) ||
+      getIntegration.refreshNeeded ||
+      forceRefresh
+    ) {
+      const data = await this._refreshIntegrationService.refresh(
+        getIntegration,
+        'hide comment'
+      );
+      if (!data || !data.accessToken) {
+        throw new HttpException(
+          'Integration needs to be reconnected',
+          HttpStatus.UNAUTHORIZED
+        );
+      }
+
+      getIntegration.token = data.accessToken;
+
+      if (integrationProvider.refreshWait) {
+        await timer(10000);
+      }
+    }
+
+    try {
+      return await integrationProvider.hideComment(
+        getIntegration.internalId,
+        postId,
+        cleanCommentId,
+        getIntegration.token,
+        hidden,
+        getIntegration
+      );
+    } catch (e) {
+      if (e instanceof RefreshToken && !forceRefresh) {
+        return this.hideComment(
+          orgId,
+          integration,
+          postId,
+          cleanCommentId,
+          hidden,
+          true
+        );
+      }
+      throw e;
+    }
   }
 
   customers(orgId: string) {

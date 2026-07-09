@@ -3,6 +3,9 @@ import {
   AuthTokenDetails,
   PostDetails,
   PostResponse,
+  SocialComment,
+  SocialCommentPostsPage,
+  SocialCommentsPage,
   SocialProvider,
 } from '@gitroom/nestjs-libraries/integrations/social/social.integrations.interface';
 import { makeId } from '@gitroom/nestjs-libraries/services/make.is';
@@ -353,7 +356,7 @@ export class InstagramProvider
       return {
         type: 'retry' as const,
         value: 'Could not upload your media',
-      }
+      };
     }
 
     if (body.indexOf('2207077') > -1) {
@@ -366,8 +369,9 @@ export class InstagramProvider
     if (body.indexOf('too little or too many attachments') > -1) {
       return {
         type: 'bad-body' as const,
-        value: 'Instagram carousel should have between 2 and 10 media attachments',
-      }
+        value:
+          'Instagram carousel should have between 2 and 10 media attachments',
+      };
     }
 
     if (body.indexOf('2207027') > -1) {
@@ -873,6 +877,152 @@ export class InstagramProvider
         status: 'success',
       },
     ];
+  }
+
+  async fetchComments(
+    id: string,
+    token: string,
+    postId: string,
+    integration: Integration,
+    cursor?: string,
+    type = 'graph.facebook.com'
+  ): Promise<SocialCommentsPage> {
+    const [accessToken] = token.split('___');
+    const fields = [
+      'id',
+      'text',
+      'username',
+      'timestamp',
+      'like_count',
+      'hidden',
+      'replies{id,text,username,timestamp,like_count,hidden}',
+    ].join(',');
+    const params = new URLSearchParams({
+      access_token: accessToken,
+      fields,
+      limit: '100',
+    });
+
+    if (cursor) {
+      params.set('after', cursor);
+    }
+
+    const response = await (
+      await this.fetch(
+        `https://${type}/v20.0/${postId}/comments?${params.toString()}`,
+        {},
+        'fetch comments'
+      )
+    ).json();
+
+    const normalize = (comment: any): SocialComment => ({
+      id: String(comment.id),
+      text: comment.text || '',
+      username: comment.username,
+      timestamp: comment.timestamp,
+      likeCount: Number(comment.like_count || 0),
+      hidden: comment.hidden,
+      replies: (comment.replies?.data || []).map(normalize),
+    });
+
+    return {
+      comments: (response.data || []).map(normalize),
+      next: response.paging?.next ? response.paging?.cursors?.after : undefined,
+    };
+  }
+
+  async replyToComment(
+    _id: string,
+    _postId: string,
+    commentId: string,
+    token: string,
+    message: string,
+    _integration: Integration,
+    type = 'graph.facebook.com'
+  ): Promise<{ id: string }> {
+    const [accessToken] = token.split('___');
+    const data = await (
+      await this.fetch(
+        `https://${type}/v20.0/${commentId}/replies?message=${encodeURIComponent(
+          message
+        )}&access_token=${accessToken}`,
+        {
+          method: 'POST',
+        },
+        'reply to comment'
+      )
+    ).json();
+
+    return { id: String(data.id) };
+  }
+
+  async hideComment(
+    _id: string,
+    _postId: string,
+    commentId: string,
+    token: string,
+    hidden: boolean,
+    _integration: Integration,
+    type = 'graph.facebook.com'
+  ): Promise<{ id: string; hidden: boolean }> {
+    const [accessToken] = token.split('___');
+    await (
+      await this.fetch(
+        `https://${type}/v20.0/${commentId}?hide=${hidden}&access_token=${accessToken}`,
+        {
+          method: 'POST',
+        },
+        'hide comment'
+      )
+    ).json();
+
+    return { id: String(commentId), hidden };
+  }
+
+  async fetchCommentPosts(
+    id: string,
+    token: string,
+    integration: Integration,
+    limit = 25,
+    cursor?: string,
+    type = 'graph.facebook.com'
+  ): Promise<SocialCommentPostsPage> {
+    const [accessToken] = token.split('___');
+    const safeLimit = Math.min(Math.max(Number(limit) || 25, 1), 100);
+    const params = new URLSearchParams({
+      access_token: accessToken,
+      fields:
+        'id,caption,media_type,permalink,timestamp,comments_count,like_count',
+      limit: String(safeLimit),
+    });
+    if (cursor) {
+      params.set('after', cursor);
+    }
+    const response = await (
+      await this.fetch(
+        `https://${type}/v20.0/${id}/media?${params.toString()}`,
+        {},
+        'fetch comment posts'
+      )
+    ).json();
+    const posts = (response.data || []).map((post: any) => ({
+      id: String(post.id),
+      releaseId: String(post.id),
+      releaseURL: post.permalink,
+      content: post.caption || `${post.media_type || 'Instagram'} post`,
+      publishDate: post.timestamp,
+      commentCount: Number(post.comments_count || 0),
+      likeCount: Number(post.like_count || 0),
+    }));
+
+    return {
+      posts,
+      total: posts.length,
+      page: 0,
+      limit: safeLimit,
+      hasMore: !!response.paging?.next,
+      next: response.paging?.next ? response.paging?.cursors?.after : undefined,
+    };
   }
 
   private setTitle(name: string) {

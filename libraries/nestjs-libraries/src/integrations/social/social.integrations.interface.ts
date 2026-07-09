@@ -32,7 +32,7 @@ export interface IAuthenticator {
     integrationId: string,
     accessToken: string,
     postId: string,
-    fromDate: number,
+    fromDate: number
   ): Promise<AnalyticsData[]>;
   changeNickname?(
     id: string,
@@ -56,6 +56,39 @@ export interface AnalyticsData {
   percentageChange: number;
 }
 
+export type SocialComment = {
+  id: string;
+  text: string;
+  username?: string;
+  timestamp?: string;
+  likeCount?: number;
+  hidden?: boolean;
+  replies?: SocialComment[];
+};
+
+export type SocialCommentsPage = {
+  comments: SocialComment[];
+  next?: string;
+};
+
+export type SocialCommentPost = {
+  id: string;
+  content: string;
+  publishDate: string;
+  releaseId: string;
+  releaseURL?: string;
+  commentCount?: number;
+  likeCount?: number;
+};
+
+export type SocialCommentPostsPage = {
+  posts: SocialCommentPost[];
+  total: number;
+  page: number;
+  limit: number;
+  hasMore: boolean;
+  next?: string;
+};
 
 export type GenerateAuthUrlResponse = {
   url: string;
@@ -97,6 +130,40 @@ export interface ISocialMediaIntegration {
     postDetails: PostDetails[],
     integration: Integration
   ): Promise<PostResponse[]>; // Schedules a new post
+
+  fetchComments?(
+    id: string,
+    accessToken: string,
+    postId: string,
+    integration: Integration,
+    cursor?: string
+  ): Promise<SocialCommentsPage>;
+
+  replyToComment?(
+    id: string,
+    postId: string,
+    commentId: string,
+    accessToken: string,
+    message: string,
+    integration: Integration
+  ): Promise<{ id: string }>;
+
+  hideComment?(
+    id: string,
+    postId: string,
+    commentId: string,
+    accessToken: string,
+    hidden: boolean,
+    integration: Integration
+  ): Promise<{ id: string; hidden: boolean }>;
+
+  fetchCommentPosts?(
+    id: string,
+    accessToken: string,
+    integration: Integration,
+    limit?: number,
+    cursor?: string
+  ): Promise<SocialCommentPostsPage>;
 }
 
 export type PostResponse = {

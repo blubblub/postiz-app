@@ -2,6 +2,8 @@ import {
   AuthTokenDetails,
   PostDetails,
   PostResponse,
+  SocialCommentPostsPage,
+  SocialCommentsPage,
   SocialProvider,
 } from '@gitroom/nestjs-libraries/integrations/social/social.integrations.interface';
 import { makeId } from '@gitroom/nestjs-libraries/services/make.is';
@@ -34,7 +36,7 @@ export class InstagramStandaloneProvider
     'instagram_business_manage_comments',
     'instagram_business_manage_insights',
   ];
-    override maxConcurrentJob = 200; // Instagram standalone has stricter limits
+  override maxConcurrentJob = 200; // Instagram standalone has stricter limits
   dto = InstagramDto;
 
   editor = 'normal' as const;
@@ -206,6 +208,78 @@ export class InstagramStandaloneProvider
       accessToken,
       postDetails,
       integration,
+      'graph.instagram.com'
+    );
+  }
+
+  async fetchComments(
+    id: string,
+    accessToken: string,
+    postId: string,
+    integration: Integration,
+    cursor?: string
+  ): Promise<SocialCommentsPage> {
+    return instagramProvider.fetchComments(
+      id,
+      accessToken,
+      postId,
+      integration,
+      cursor,
+      'graph.instagram.com'
+    );
+  }
+
+  async replyToComment(
+    id: string,
+    postId: string,
+    commentId: string,
+    accessToken: string,
+    message: string,
+    integration: Integration
+  ): Promise<{ id: string }> {
+    return instagramProvider.replyToComment(
+      id,
+      postId,
+      commentId,
+      accessToken,
+      message,
+      integration,
+      'graph.instagram.com'
+    );
+  }
+
+  async hideComment(
+    id: string,
+    postId: string,
+    commentId: string,
+    accessToken: string,
+    hidden: boolean,
+    integration: Integration
+  ): Promise<{ id: string; hidden: boolean }> {
+    return instagramProvider.hideComment(
+      id,
+      postId,
+      commentId,
+      accessToken,
+      hidden,
+      integration,
+      'graph.instagram.com'
+    );
+  }
+
+  async fetchCommentPosts(
+    id: string,
+    accessToken: string,
+    integration: Integration,
+    limit?: number,
+    cursor?: string
+  ): Promise<SocialCommentPostsPage> {
+    return instagramProvider.fetchCommentPosts(
+      id,
+      accessToken,
+      integration,
+      limit,
+      cursor,
       'graph.instagram.com'
     );
   }

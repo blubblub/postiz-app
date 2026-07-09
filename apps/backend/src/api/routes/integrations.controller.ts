@@ -175,6 +175,75 @@ export class IntegrationsController {
     return this._integrationService.updateNameAndUrl(id, name, url);
   }
 
+  @Get('/comments/:id/posts')
+  getCommentPosts(
+    @GetOrgFromRequest() org: Organization,
+    @Param('id') id: string,
+    @Query('limit') limit?: string,
+    @Query('after') after?: string
+  ) {
+    return this._integrationService.fetchCommentPosts(
+      org.id,
+      id,
+      Number(limit || 25),
+      after
+    );
+  }
+
+  @Get('/comments/:id/posts/:postId')
+  async getPostComments(
+    @GetOrgFromRequest() org: Organization,
+    @Param('id') id: string,
+    @Param('postId') postId: string,
+    @Query('after') after?: string
+  ) {
+    const comments = await this._integrationService.fetchPostComments(
+      org.id,
+      id,
+      postId,
+      after
+    );
+
+    return {
+      post: { id: postId, releaseId: postId },
+      ...comments,
+    };
+  }
+
+  @Post('/comments/:id/posts/:postId/replies')
+  @CheckPolicies([AuthorizationActions.Create, Sections.CHANNEL])
+  replyToComment(
+    @GetOrgFromRequest() org: Organization,
+    @Param('id') id: string,
+    @Param('postId') postId: string,
+    @Body() body: { message: string; parentCommentId: string }
+  ) {
+    return this._integrationService.replyToComment(
+      org.id,
+      id,
+      postId,
+      body?.parentCommentId,
+      body?.message
+    );
+  }
+
+  @Post('/comments/:id/posts/:postId/hide')
+  @CheckPolicies([AuthorizationActions.Create, Sections.CHANNEL])
+  hideComment(
+    @GetOrgFromRequest() org: Organization,
+    @Param('id') id: string,
+    @Param('postId') postId: string,
+    @Body() body: { commentId: string; hidden: boolean }
+  ) {
+    return this._integrationService.hideComment(
+      org.id,
+      id,
+      postId,
+      body?.commentId,
+      !!body?.hidden
+    );
+  }
+
   @Get('/:id')
   getSingleIntegration(
     @Param('id') id: string,
