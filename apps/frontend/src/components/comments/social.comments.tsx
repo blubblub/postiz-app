@@ -37,6 +37,7 @@ type CommentPost = {
   publishDate: string;
   releaseURL?: string;
   releaseId?: string;
+  thumbnail?: string;
   commentCount?: number;
   likeCount?: number;
   integration?: {
@@ -701,9 +702,22 @@ export const SocialComments = () => {
                   currentPost?.id === post.id && 'border-forth bg-boxHover'
                 )}
               >
-                <div className="line-clamp-3 break-words text-[14px] leading-[20px]">
-                  {shortText(post.content) ||
-                    t('untitled_post', 'Untitled post')}
+                <div className="flex gap-[10px]">
+                  {!!post.thumbnail && (
+                    <img
+                      src={post.thumbnail}
+                      alt=""
+                      loading="lazy"
+                      onError={(event) => {
+                        event.currentTarget.style.display = 'none';
+                      }}
+                      className="h-[48px] w-[48px] shrink-0 rounded-[6px] object-cover"
+                    />
+                  )}
+                  <div className="line-clamp-3 min-w-0 flex-1 break-words text-[14px] leading-[20px]">
+                    {shortText(post.content) ||
+                      t('untitled_post', 'Untitled post')}
+                  </div>
                 </div>
                 <div className="mt-[10px] flex flex-wrap items-center gap-[8px] text-[12px] text-textColor/60">
                   <span>{formatDate(post.publishDate)}</span>
