@@ -227,6 +227,7 @@ export class TiktokBusinessProvider
           'create_time',
           'caption',
           'share_url',
+          'cover_image_url',
           'likes',
           'comments',
         ],
@@ -243,6 +244,7 @@ export class TiktokBusinessProvider
       publishDate: v.create_time
         ? dayjs.unix(Number(v.create_time)).toISOString()
         : '',
+      thumbnail: v.cover_image_url,
       commentCount: Number(v.comments ?? v.comment_count ?? 0),
       likeCount: Number(v.likes ?? v.like_count ?? 0),
     }));

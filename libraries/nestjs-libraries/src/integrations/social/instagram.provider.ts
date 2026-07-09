@@ -992,7 +992,7 @@ export class InstagramProvider
     const params = new URLSearchParams({
       access_token: accessToken,
       fields:
-        'id,caption,media_type,permalink,timestamp,comments_count,like_count',
+        'id,caption,media_type,media_url,thumbnail_url,permalink,timestamp,comments_count,like_count',
       limit: String(safeLimit),
     });
     if (cursor) {
@@ -1011,6 +1011,7 @@ export class InstagramProvider
       releaseURL: post.permalink,
       content: post.caption || `${post.media_type || 'Instagram'} post`,
       publishDate: post.timestamp,
+      thumbnail: post.thumbnail_url || post.media_url,
       commentCount: Number(post.comments_count || 0),
       likeCount: Number(post.like_count || 0),
     }));
