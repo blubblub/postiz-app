@@ -1,7 +1,14 @@
 'use client';
 
 import useSWR from 'swr';
-import { type UIEvent, useCallback, useEffect, useMemo, useState } from 'react';
+import {
+  type UIEvent,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import { orderBy } from 'lodash';
 import clsx from 'clsx';
 import ImageWithFallback from '@gitroom/react/helpers/image.with.fallback';
@@ -65,6 +72,10 @@ type SocialComment = {
   likeCount?: number;
   hidden?: boolean;
   replies?: SocialComment[];
+  /** Set on a reply shown optimistically while its POST is still in flight. */
+  pending?: boolean;
+  /** Set while a reply exists only in this tab and has no server id yet. */
+  optimistic?: boolean;
 };
 
 type CommentsResponse = {
@@ -99,6 +110,39 @@ const formatDate = (value?: string) => {
     timeStyle: 'short',
   }).format(date);
 };
+
+const addReplyToTree = (
+  list: SocialComment[],
+  parentId: string,
+  reply: SocialComment
+): SocialComment[] =>
+  list.map((comment) => {
+    if (comment.id === parentId) {
+      return { ...comment, replies: [...(comment.replies || []), reply] };
+    }
+
+    return comment.replies?.length
+      ? {
+          ...comment,
+          replies: addReplyToTree(comment.replies, parentId, reply),
+        }
+      : comment;
+  });
+
+const treeHasReply = (
+  list: SocialComment[],
+  parentId: string,
+  text: string
+): boolean =>
+  list.some((comment) => {
+    if (comment.id === parentId) {
+      return (comment.replies || []).some((reply) => reply.text === text);
+    }
+
+    return comment.replies?.length
+      ? treeHasReply(comment.replies, parentId, text)
+      : false;
+  });
 
 const shouldLoadMore = (element: HTMLElement) =>
   element.scrollHeight - element.scrollTop - element.clientHeight < 160;
@@ -159,7 +203,8 @@ const CommentThread = ({
     <div
       className={clsx(
         'rounded-[8px] border border-tableBorder bg-newBgColor p-[14px]',
-        depth > 0 && 'ms-[22px] mt-[10px]'
+        depth > 0 && 'ms-[22px] mt-[10px]',
+        comment.pending && 'opacity-60'
       )}
     >
       <div className="flex items-start gap-[10px]">
@@ -192,18 +237,25 @@ const CommentThread = ({
           )}
         </div>
         <div className="flex shrink-0 flex-col items-end gap-[4px]">
-          <button
-            type="button"
-            onClick={toggleHide}
-            disabled={hiding}
-            className="whitespace-nowrap rounded-[6px] border border-tableBorder bg-newBgColorInner px-[10px] py-[5px] text-[12px] font-[500] text-textColor hover:bg-boxHover disabled:opacity-50"
-          >
-            {hiding
-              ? t('working', 'Working...')
-              : comment.hidden
-              ? t('unhide', 'Unhide')
-              : t('hide', 'Hide')}
-          </button>
+          {comment.pending ? (
+            <div className="flex items-center gap-[6px] text-[12px] text-textColor/60">
+              <div className="h-[12px] w-[12px] animate-spin rounded-full border-[2px] border-textColor/30 border-t-textColor" />
+              {t('sending', 'Sending...')}
+            </div>
+          ) : comment.optimistic ? null : (
+            <button
+              type="button"
+              onClick={toggleHide}
+              disabled={hiding}
+              className="whitespace-nowrap rounded-[6px] border border-tableBorder bg-newBgColorInner px-[10px] py-[5px] text-[12px] font-[500] text-textColor hover:bg-boxHover disabled:opacity-50"
+            >
+              {hiding
+                ? t('working', 'Working...')
+                : comment.hidden
+                ? t('unhide', 'Unhide')
+                : t('hide', 'Hide')}
+            </button>
+          )}
           {!!hideError && (
             <div className="text-[11px] text-red-300">{hideError}</div>
           )}
@@ -260,6 +312,12 @@ export const SocialComments = () => {
   const [nextPostCursor, setNextPostCursor] = useState<string | undefined>();
   const [loadingMorePosts, setLoadingMorePosts] = useState(false);
   const [comments, setComments] = useState<SocialComment[]>([]);
+  // Replies posted from this tab, kept until the server's copy shows up so a
+  // slow TikTok round-trip can't make a sent reply flicker out of the thread.
+  const [pendingReplies, setPendingReplies] = useState<
+    { parentId: string; reply: SocialComment }[]
+  >([]);
+  const pendingIdRef = useRef(0);
   const [nextCommentCursor, setNextCommentCursor] = useState<
     string | undefined
   >();
@@ -391,9 +449,24 @@ export const SocialComments = () => {
   );
 
   useEffect(() => {
-    setComments(commentsData?.comments || []);
+    const base = commentsData?.comments || [];
+    // Anything the server now returns can stop being tracked locally.
+    const outstanding = pendingReplies.filter(
+      (item) => !treeHasReply(base, item.parentId, item.reply.text)
+    );
+
+    if (outstanding.length !== pendingReplies.length) {
+      setPendingReplies(outstanding);
+    }
+
+    setComments(
+      outstanding.reduce(
+        (acc, item) => addReplyToTree(acc, item.parentId, item.reply),
+        base
+      )
+    );
     setNextCommentCursor(commentsData?.next);
-  }, [commentsData]);
+  }, [commentsData, pendingReplies]);
 
   const loadMorePosts = useCallback(async () => {
     if (!currentIntegration || !nextPostCursor || loadingMorePosts) {
@@ -486,21 +559,60 @@ export const SocialComments = () => {
         throw new Error('Missing selected post');
       }
 
-      const response = await fetch(
-        `/integrations/comments/${currentIntegration.id}/posts/${currentPost.id}/replies`,
-        {
-          method: 'POST',
-          body: JSON.stringify({ parentCommentId, message }),
+      // Show the reply straight away with a spinner; the merge effect keeps it
+      // in the thread until the server's own copy comes back.
+      const pendingId = `pending-${pendingIdRef.current++}`;
+      const optimistic = {
+        parentId: parentCommentId,
+        reply: {
+          id: pendingId,
+          text: message,
+          username: currentIntegration.name,
+          timestamp: new Date().toISOString(),
+          pending: true,
+          optimistic: true,
+        } as SocialComment,
+      };
+      setPendingReplies((current) => [...current, optimistic]);
+
+      try {
+        const response = await fetch(
+          `/integrations/comments/${currentIntegration.id}/posts/${currentPost.id}/replies`,
+          {
+            method: 'POST',
+            body: JSON.stringify({ parentCommentId, message }),
+          }
+        );
+
+        if (!response.ok) {
+          throw new Error('Could not send reply');
         }
-      );
 
-      if (!response.ok) {
-        throw new Error('Could not send reply');
+        // Sent — drop the spinner but keep showing it until the refetch
+        // actually returns it.
+        setPendingReplies((current) =>
+          current.map((item) =>
+            item.reply.id === pendingId
+              ? { ...item, reply: { ...item.reply, pending: false } }
+              : item
+          )
+        );
+        await mutateComments();
+      } catch (err) {
+        // Failed — take it back out so the thread matches the server.
+        setPendingReplies((current) =>
+          current.filter((item) => item.reply.id !== pendingId)
+        );
+        throw err;
       }
-
-      await mutateComments();
     },
-    [currentIntegration?.id, currentPost?.id, fetch, mutateComments]
+    [
+      currentIntegration?.id,
+      currentIntegration?.name,
+      currentPost?.id,
+      fetch,
+      mutateComments,
+    ]
   );
 
   const hideComment = useCallback(
