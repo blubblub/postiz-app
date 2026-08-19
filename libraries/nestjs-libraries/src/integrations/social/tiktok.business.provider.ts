@@ -20,7 +20,12 @@ import { Rules } from '@gitroom/nestjs-libraries/chat/rules.description.decorato
 // TikTok "API for Business" — a DIFFERENT surface from the consumer Login Kit /
 // Content Posting API used by tiktok.provider.ts:
 //   - host:   business-api.tiktok.com/open_api/v1.3/business/*
-//   - auth:   app_id/secret + auth_code flow (NOT client_key/PKCE)
+//   - auth:   standard OAuth2 code flow — authorize on www.tiktok.com/v2 with
+//             client_key=app_id, exchange on /tt_user/oauth2/token/ with
+//             client_id/client_secret/redirect_uri. The business-api
+//             /portal/auth + /oauth2/access_token/ pair is the ADVERTISER
+//             flow: it yields advertiser_ids and its token is rejected with
+//             40105 by every /business/* endpoint (verified on a live app).
 //   - token:  passed as the `Access-Token` header (NOT `Authorization: Bearer`)
 //   - id:     business_id (NOT open_id)
 // This is the only TikTok surface that exposes organic-post comment moderation
@@ -40,9 +45,19 @@ export class TiktokBusinessProvider
   isBetweenSteps = false;
   toolTip =
     'Connect a TikTok Business account to manage comments and replies on its posts (this channel does not publish).';
-  // TikTok API for Business permissions are fixed on the app in the developer
-  // portal, they are not requested through the authorize URL, so this stays empty.
-  scopes = [] as string[];
+  // Confirmed against the app's "TikTok account holder authorization URL" in
+  // the TikTok for Business developer portal. That app enables more (insights,
+  // video.publish/upload, biz.*) — only what this comment-only channel uses is
+  // requested here: profile for the channel name/avatar, video.list for
+  // /business/video/list/, comment.* for list + reply + hide.
+  scopes = [
+    'user.info.basic',
+    'user.info.username',
+    'user.info.profile',
+    'video.list',
+    'comment.list',
+    'comment.list.manage',
+  ];
   editor = 'normal' as const;
 
   maxLength() {
@@ -103,13 +118,16 @@ export class TiktokBusinessProvider
   async generateAuthUrl() {
     const state = Math.random().toString(36).substring(2);
     return {
-      // Business portal returns the code back as `auth_code` (mapped to `code`
-      // for this provider in continue.integration.tsx).
+      // Standard OAuth2 code flow — the callback carries `code`. The app_id
+      // doubles as the client_key here (verified: TikTok accepts it and echoes
+      // enter_from=dev_<app_id> instead of rejecting the client).
       url:
-        'https://business-api.tiktok.com/portal/auth' +
-        `?app_id=${process.env.TIKTOK_BUSINESS_APP_ID}` +
-        `&state=${state}` +
-        `&redirect_uri=${encodeURIComponent(this.redirectUri())}`,
+        'https://www.tiktok.com/v2/auth/authorize/' +
+        `?client_key=${process.env.TIKTOK_BUSINESS_APP_ID}` +
+        `&scope=${encodeURIComponent(this.scopes.join(','))}` +
+        '&response_type=code' +
+        `&redirect_uri=${encodeURIComponent(this.redirectUri())}` +
+        `&state=${state}`,
       codeVerifier: state,
       state,
     };
@@ -123,22 +141,26 @@ export class TiktokBusinessProvider
     // Organic Business-Account (TikTok Account) access uses the tt_user token
     // flow — NOT the plain /oauth2/access_token/ advertiser flow, which returns
     // advertiser_ids and cannot call the /business/* comment endpoints.
+    // Field names verified against the live endpoint: it rejects app_id/secret
+    // and requires client_id, client_secret, auth_code, grant_type and a
+    // redirect_uri matching the one used on the authorize page.
     return this.exchange('/tt_user/oauth2/token/', {
-      app_id: process.env.TIKTOK_BUSINESS_APP_ID!,
-      secret: process.env.TIKTOK_BUSINESS_APP_SECRET!,
+      client_id: process.env.TIKTOK_BUSINESS_APP_ID!,
+      client_secret: process.env.TIKTOK_BUSINESS_APP_SECRET!,
       auth_code: params.code,
       grant_type: 'authorization_code',
-      business: 'tt_user',
+      redirect_uri: this.redirectUri(),
     });
   }
 
   async refreshToken(refreshToken: string): Promise<AuthTokenDetails> {
+    // Verified: this endpoint wants client_id/client_secret/grant_type/
+    // refresh_token and does NOT take a redirect_uri.
     return this.exchange('/tt_user/oauth2/refresh_token/', {
-      app_id: process.env.TIKTOK_BUSINESS_APP_ID!,
-      secret: process.env.TIKTOK_BUSINESS_APP_SECRET!,
+      client_id: process.env.TIKTOK_BUSINESS_APP_ID!,
+      client_secret: process.env.TIKTOK_BUSINESS_APP_SECRET!,
       refresh_token: refreshToken,
       grant_type: 'refresh_token',
-      business: 'tt_user',
     });
   }
 

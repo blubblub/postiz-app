@@ -72,11 +72,12 @@ export const ContinueIntegration: FC<{
       };
     }
 
-    // TikTok API for Business returns the code back as `auth_code`, not `code`.
+    // The v2 authorize flow returns `code`; the older business portal flow
+    // returned `auth_code`. Accept either so a portal-issued callback still works.
     if (provider === 'tiktok-business') {
       return {
         state: searchParams.state || '',
-        code: searchParams.auth_code || '',
+        code: searchParams.code || searchParams.auth_code || '',
         refresh: searchParams.refresh || '',
       };
     }
