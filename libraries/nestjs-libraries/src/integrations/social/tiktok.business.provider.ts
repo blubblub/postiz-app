@@ -238,46 +238,91 @@ export class TiktokBusinessProvider
     cursor?: string
   ): Promise<SocialCommentPostsPage> {
     const safeLimit = Math.min(Math.max(Number(limit) || 25, 1), 100);
-    // ponytail: [VERIFY] /business/video/list/ param + response field names.
-    const data = await this.call<any>('/business/video/list/', accessToken, {
-      query: {
-        business_id: id,
-        // `fields` IS required on video/list and must include item_id. Count
-        // fields are `likes`/`comments` (not like_count/comment_count).
-        fields: [
-          'item_id',
-          'create_time',
-          'caption',
-          'share_url',
-          'cover_image_url',
-          'likes',
-          'comments',
-        ],
-        max_count: safeLimit,
-        cursor,
-      },
-    });
 
-    const posts: SocialCommentPost[] = (data?.videos || []).map((v: any) => ({
-      id: String(v.item_id),
-      releaseId: String(v.item_id),
-      releaseURL: v.share_url,
-      content: v.caption || 'TikTok video',
-      publishDate: v.create_time
-        ? dayjs.unix(Number(v.create_time)).toISOString()
-        : '',
-      thumbnail: v.cover_image_url,
-      commentCount: Number(v.comments ?? v.comment_count ?? 0),
-      likeCount: Number(v.likes ?? v.like_count ?? 0),
-    }));
+    // TikTok pages this endpoint by timestamp, NOT by item: it walks backwards
+    // in ~3-day steps and returns an empty page (with has_more=true) for every
+    // step that contains no posts. The default first page starts at "now", so
+    // an account whose last post was a year ago needs hundreds of requests
+    // before a single video appears — verified live: 40 sequential pages
+    // covered only 4 months and returned nothing.
+    //
+    // So: page normally while we're finding posts, and when a page comes back
+    // empty, jump the cursor backwards by a doubling interval until content
+    // reappears. That reaches a year-old post in ~6 requests instead of ~150.
+    //
+    // ponytail: a doubling jump can overshoot an isolated post that sits inside
+    // a skipped window, so the very newest post may be missed on sparse
+    // accounts. Replace with a binary search between the last empty and first
+    // non-empty cursor if that turns out to matter.
+    // TikTok caps this endpoint at max_count 20 ("Max_count needs to be in the
+    // range of [1, 20]", verified live) — request pages of 20 and accumulate.
+    const PAGE_SIZE = Math.min(safeLimit, 20);
+    const EMPTY_JUMP_START = 7 * 24 * 60 * 60 * 1000;
+    const MAX_REQUESTS = 16;
+
+    const posts: SocialCommentPost[] = [];
+    let next = cursor;
+    let hasMore = true;
+    let emptyJump = EMPTY_JUMP_START;
+
+    for (let i = 0; i < MAX_REQUESTS && posts.length < safeLimit; i++) {
+      const data = await this.call<any>('/business/video/list/', accessToken, {
+        query: {
+          business_id: id,
+          // Field names verified against the live API: the thumbnail is
+          // `thumbnail_url` (`cover_image_url` is rejected with 40002) and the
+          // counts are `likes`/`comments`, not like_count/comment_count.
+          fields: [
+            'item_id',
+            'create_time',
+            'caption',
+            'share_url',
+            'thumbnail_url',
+            'likes',
+            'comments',
+          ],
+          max_count: PAGE_SIZE,
+          cursor: next,
+        },
+      });
+
+      const videos: any[] = data?.videos || [];
+      hasMore = !!data?.has_more;
+      const apiCursor = data?.cursor ? Number(data.cursor) : undefined;
+
+      for (const v of videos) {
+        posts.push({
+          id: String(v.item_id),
+          releaseId: String(v.item_id),
+          releaseURL: v.share_url,
+          content: v.caption || 'TikTok video',
+          publishDate: v.create_time
+            ? dayjs.unix(Number(v.create_time)).toISOString()
+            : '',
+          thumbnail: v.thumbnail_url,
+          commentCount: Number(v.comments ?? 0),
+          likeCount: Number(v.likes ?? 0),
+        });
+      }
+
+      if (!hasMore || !apiCursor) break;
+
+      if (videos.length) {
+        emptyJump = EMPTY_JUMP_START;
+        next = String(apiCursor);
+      } else {
+        next = String(apiCursor - emptyJump);
+        emptyJump *= 2;
+      }
+    }
 
     return {
-      posts,
+      posts: posts.slice(0, safeLimit),
       total: posts.length,
       page: 0,
       limit: safeLimit,
-      hasMore: !!data?.has_more,
-      next: data?.has_more ? String(data?.cursor) : undefined,
+      hasMore,
+      next: hasMore ? next : undefined,
     };
   }
 
@@ -296,7 +341,8 @@ export class TiktokBusinessProvider
       query: {
         business_id: id,
         video_id: postId,
-        max_count: 50,
+        // TikTok caps this at 30 ("max_count: number must be most 30").
+        max_count: 30,
         cursor,
       },
     });
@@ -344,7 +390,8 @@ export class TiktokBusinessProvider
           video_id: postId,
           comment_id: commentId,
           status: 'ALL',
-          max_count: 50,
+          // Same 30 cap as comment/list (verified live).
+          max_count: 30,
         },
       }
     );
