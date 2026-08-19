@@ -531,6 +531,10 @@ export class IntegrationService {
     const hasMore = nextOffset < total;
 
     return {
+      // Lets the screen say "still syncing" instead of showing a bare empty
+      // list: the first crawl of a dormant account takes minutes before the
+      // first post appears.
+      syncing: !integration.commentPostsDone,
       posts: rows.map((row) => ({
         id: row.postId,
         releaseId: row.postId,
@@ -573,8 +577,13 @@ export class IntegrationService {
 
     // Stay well under any per-app quota: this is a background backfill, it has
     // no deadline, and the account is shared with whatever else uses the app.
-    const PACE_MS = 250;
+    const PACE_MS = 500;
     const BATCH = 20;
+    // Empty stretches are the slow part — a dormant account is hundreds of
+    // slices of nothing. Those slices don't depend on each other's results, so
+    // scan a few at a time; the moment posts turn up we go back to stepping
+    // sequentially, where the adaptive jump is doing the work anyway.
+    const SCAN_WIDTH = 4;
     // 5 years back: this account's oldest visible posts are ~4 years old, and a
     // shorter floor would drop history the screen shows today.
     const FLOOR = dayjs().subtract(5, 'years').valueOf();
@@ -584,17 +593,25 @@ export class IntegrationService {
     let cursor = Number(integration.commentPostsCursor) || dayjs().valueOf();
     let sinceSave = 0;
     let rateLimitHits = 0;
+    let scanning = true;
 
     try {
       while (cursor > FLOOR) {
-        let page;
+        let pages: SocialCommentPostsPage[];
         try {
-          page = await provider.fetchCommentPosts(
-            integration.internalId,
-            integration.token,
-            integration,
-            20,
-            String(cursor)
+          // One slice while we're in content, SCAN_WIDTH consecutive slices
+          // while we're in a gap.
+          const width = scanning ? SCAN_WIDTH : 1;
+          pages = await Promise.all(
+            Array.from({ length: width }, (_, index) =>
+              provider.fetchCommentPosts!(
+                integration.internalId,
+                integration.token,
+                integration,
+                20,
+                String(cursor - index * sliceMs)
+              )
+            )
           );
           rateLimitHits = 0;
         } catch (err: any) {
@@ -619,7 +636,9 @@ export class IntegrationService {
           throw err;
         }
 
-        const posts = page.posts || [];
+        const posts = pages.flatMap((page) => page.posts || []);
+        // Scan wide again only while the timeline stays empty.
+        scanning = !posts.length;
         if (posts.length) {
           await this._integrationRepository.saveCachedCommentPosts(
             integration.id,
@@ -645,10 +664,11 @@ export class IntegrationService {
             )
           : undefined;
 
+        const scannedTo = cursor - pages.length * sliceMs;
         cursor =
           posts.length >= 20 && oldest
             ? oldest - 1000
-            : Math.min(cursor - sliceMs, oldest ? oldest - 1000 : Infinity);
+            : Math.min(scannedTo, oldest ? oldest - 1000 : Infinity);
 
         if (++sinceSave >= BATCH) {
           sinceSave = 0;

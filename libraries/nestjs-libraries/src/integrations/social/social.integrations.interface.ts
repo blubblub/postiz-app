@@ -83,6 +83,8 @@ export type SocialCommentPost = {
 };
 
 export type SocialCommentPostsPage = {
+  /** True while a background crawl is still filling the cached post list. */
+  syncing?: boolean;
   posts: SocialCommentPost[];
   total: number;
   page: number;

@@ -56,6 +56,8 @@ type CommentPost = {
 };
 
 type PostsResponse = {
+  /** True while the backend is still crawling this channel's post history. */
+  syncing?: boolean;
   posts: CommentPost[];
   total: number;
   page: number;
@@ -402,6 +404,11 @@ export const SocialComments = () => {
     {
       revalidateOnFocus: false,
       fallbackData: { posts: [], total: 0, page: 0, limit: 25, hasMore: false },
+      // While the first crawl is running the list fills in server-side, so poll
+      // until something shows up. Only while empty — once there are posts a
+      // refetch would reset whatever the user has scrolled through.
+      refreshInterval: (latest) =>
+        latest?.syncing && !latest?.posts?.length ? 15000 : 0,
     }
   );
 
@@ -797,7 +804,25 @@ export const SocialComments = () => {
           )}
           {!postsLoading && !postsError && !posts.length && (
             <div className="rounded-[8px] bg-third p-[14px] text-[14px] text-textColor/70">
-              {t('no_posts_with_comments', 'No posts found yet.')}
+              {postsData?.syncing ? (
+                <div className="flex items-center gap-[10px]">
+                  <div className="h-[14px] w-[14px] shrink-0 animate-spin rounded-full border-[2px] border-textColor/30 border-t-textColor" />
+                  <span>
+                    {t(
+                      'syncing_posts',
+                      'Syncing posts from the channel. The first sync walks back through the whole history and can take a few minutes.'
+                    )}
+                  </span>
+                </div>
+              ) : (
+                t('no_posts_with_comments', 'No posts found yet.')
+              )}
+            </div>
+          )}
+          {!postsLoading && !postsError && !!posts.length && postsData?.syncing && (
+            <div className="flex items-center gap-[8px] text-[12px] text-textColor/60">
+              <div className="h-[10px] w-[10px] shrink-0 animate-spin rounded-full border-[2px] border-textColor/30 border-t-textColor" />
+              {t('syncing_more_posts', 'Still syncing older posts...')}
             </div>
           )}
           <div
