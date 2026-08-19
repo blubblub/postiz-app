@@ -239,33 +239,57 @@ export class TiktokBusinessProvider
   ): Promise<SocialCommentPostsPage> {
     const safeLimit = Math.min(Math.max(Number(limit) || 25, 1), 100);
 
-    // TikTok pages this endpoint by timestamp, NOT by item: it walks backwards
-    // in ~3-day steps and returns an empty page (with has_more=true) for every
-    // step that contains no posts. The default first page starts at "now", so
-    // an account whose last post was a year ago needs hundreds of requests
-    // before a single video appears — verified live: 40 sequential pages
-    // covered only 4 months and returned nothing.
+    // TikTok pages this endpoint by timestamp, NOT by item. It walks backwards
+    // from the cursor and returns an empty page (with has_more=true) whenever
+    // the stretch it scanned holds no posts, and how far it scans back is not
+    // fixed — verified live it reached 5 months back in one region and under 2
+    // weeks in another. The default page starts at "now", so a dormant account
+    // returns nothing at all: 40 sequential pages covered 4 months and found
+    // zero videos.
     //
-    // So: page normally while we're finding posts, and when a page comes back
-    // empty, jump the cursor backwards by a doubling interval until content
-    // reappears. That reaches a year-old post in ~6 requests instead of ~150.
-    //
-    // ponytail: a doubling jump can overshoot an isolated post that sits inside
-    // a skipped window, so the very newest post may be missed on sparse
-    // accounts. Replace with a binary search between the last empty and first
-    // non-empty cursor if that turns out to matter.
+    // So the descent below jumps the cursor back by a doubling interval over
+    // empty stretches (reaches a 14-month-old post in ~8 requests instead of
+    // ~150), and the climb afterwards undoes the overshoot that causes.
+    const DAY_MS = 24 * 60 * 60 * 1000;
     // TikTok caps this endpoint at max_count 20 ("Max_count needs to be in the
     // range of [1, 20]", verified live) — request pages of 20 and accumulate.
     const PAGE_SIZE = Math.min(safeLimit, 20);
-    const EMPTY_JUMP_START = 7 * 24 * 60 * 60 * 1000;
+    const EMPTY_JUMP_START = 7 * DAY_MS;
     const MAX_REQUESTS = 16;
+    const MAX_CLIMB = 6;
 
     const posts: SocialCommentPost[] = [];
-    let next = cursor;
-    let hasMore = true;
-    let emptyJump = EMPTY_JUMP_START;
+    // Cursor jumps can land on a window overlapping one already fetched, so
+    // guard against adding the same video twice.
+    const seen = new Set<string>();
+    let newestSeconds = 0;
 
-    for (let i = 0; i < MAX_REQUESTS && posts.length < safeLimit; i++) {
+    const collect = (videos: any[]) => {
+      let added = 0;
+      for (const v of videos) {
+        const key = String(v.item_id);
+        if (seen.has(key)) {
+          continue;
+        }
+        seen.add(key);
+        added++;
+        const createdAt = Number(v.create_time) || 0;
+        newestSeconds = Math.max(newestSeconds, createdAt);
+        posts.push({
+          id: key,
+          releaseId: key,
+          releaseURL: v.share_url,
+          content: v.caption || 'TikTok video',
+          publishDate: createdAt ? dayjs.unix(createdAt).toISOString() : '',
+          thumbnail: v.thumbnail_url,
+          commentCount: Number(v.comments ?? 0),
+          likeCount: Number(v.likes ?? 0),
+        });
+      }
+      return added;
+    };
+
+    const listVideos = async (at?: string) => {
       const data = await this.call<any>('/business/video/list/', accessToken, {
         query: {
           business_id: id,
@@ -282,42 +306,72 @@ export class TiktokBusinessProvider
             'comments',
           ],
           max_count: PAGE_SIZE,
-          cursor: next,
+          cursor: at,
         },
       });
+      return {
+        videos: (data?.videos || []) as any[],
+        hasMore: !!data?.has_more,
+        cursor: data?.cursor ? Number(data.cursor) : undefined,
+      };
+    };
 
-      const videos: any[] = data?.videos || [];
-      hasMore = !!data?.has_more;
-      const apiCursor = data?.cursor ? Number(data.cursor) : undefined;
+    let next = cursor;
+    let hasMore = true;
+    let emptyJump = EMPTY_JUMP_START;
 
-      for (const v of videos) {
-        posts.push({
-          id: String(v.item_id),
-          releaseId: String(v.item_id),
-          releaseURL: v.share_url,
-          content: v.caption || 'TikTok video',
-          publishDate: v.create_time
-            ? dayjs.unix(Number(v.create_time)).toISOString()
-            : '',
-          thumbnail: v.thumbnail_url,
-          commentCount: Number(v.comments ?? 0),
-          likeCount: Number(v.likes ?? 0),
-        });
+    for (let i = 0; i < MAX_REQUESTS && posts.length < safeLimit; i++) {
+      const page = await listVideos(next);
+      hasMore = page.hasMore;
+      const found = collect(page.videos);
+
+      if (!hasMore || !page.cursor) {
+        break;
       }
 
-      if (!hasMore || !apiCursor) break;
-
-      if (videos.length) {
+      if (found) {
         emptyJump = EMPTY_JUMP_START;
-        next = String(apiCursor);
+        next = String(page.cursor);
       } else {
-        next = String(apiCursor - emptyJump);
+        next = String(page.cursor - emptyJump);
         emptyJump *= 2;
       }
     }
 
+    // The doubling descent can leap straight past a sparse account's most
+    // recent posts (verified live: it landed on February while the newest post
+    // was that June). Only the first page is affected — later pages are already
+    // walking downwards — so climb back up from the newest post found, probing
+    // a month above it until nothing newer comes back.
+    if (!cursor && newestSeconds) {
+      let climb = 30 * DAY_MS;
+      for (let i = 0; i < MAX_CLIMB; i++) {
+        const above = newestSeconds;
+        const page = await listVideos(String(above * 1000 + climb));
+        collect(page.videos);
+        if (newestSeconds > above) {
+          // Found newer posts — restart the probe close to the new high-water
+          // mark, since TikTok only looks back a short way from the cursor.
+          climb = 30 * DAY_MS;
+        } else {
+          climb *= 2;
+        }
+      }
+    }
+
+    // Each page arrives newest-first and we walk backwards, so this is already
+    // the natural order — but sort explicitly so the list is guaranteed
+    // latest-to-oldest however the cursor jumps and the climb interleaved.
+    // publishDate is an ISO string, which sorts chronologically as text.
+    posts.sort((a, b) =>
+      (b.publishDate || '').localeCompare(a.publishDate || '')
+    );
+
+    // Return everything fetched rather than trimming to safeLimit: `next` has
+    // already advanced past the whole last page, so anything trimmed here would
+    // be skipped by the following request and lost from the list entirely.
     return {
-      posts: posts.slice(0, safeLimit),
+      posts,
       total: posts.length,
       page: 0,
       limit: safeLimit,
