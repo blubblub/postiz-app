@@ -471,6 +471,17 @@ export class IntegrationService {
       }
     }
 
+    // Providers whose listing can only be crawled in slices are served from the
+    // cache, with the crawl topping it up in the background.
+    if (integrationProvider.commentPostsSliceMs) {
+      return this.readCachedCommentPosts(
+        getIntegration,
+        integrationProvider,
+        limit,
+        cursor
+      );
+    }
+
     try {
       return await integrationProvider.fetchCommentPosts(
         getIntegration.internalId,
@@ -484,6 +495,190 @@ export class IntegrationService {
         return this.fetchCommentPosts(orgId, integration, limit, cursor, true);
       }
       throw e;
+    }
+  }
+
+  // Integrations currently being crawled, so a burst of requests (or infinite
+  // scroll) can't start the same crawl several times over.
+  private static readonly crawlingCommentPosts = new Set<string>();
+
+  private async readCachedCommentPosts(
+    integration: Integration,
+    provider: SocialProvider,
+    limit: number,
+    cursor?: string
+  ): Promise<SocialCommentPostsPage> {
+    const offset = Math.max(Number(cursor) || 0, 0);
+    const rows = await this._integrationRepository.getCachedCommentPosts(
+      integration.id,
+      limit,
+      offset
+    );
+
+    // Keep filling in the background — the first crawl of a long-dormant
+    // account takes minutes, so it must not block the response.
+    if (!integration.commentPostsDone) {
+      this.crawlCommentPosts(integration, provider);
+    }
+
+    const nextOffset = offset + rows.length;
+    const total = await this._integrationRepository.countCachedCommentPosts(
+      integration.id
+    );
+    // Only advertise more when more is actually cached. Saying "yes" while the
+    // crawl is still running would have infinite scroll re-requesting a page
+    // that cannot grow yet; the extra posts show up on the next load instead.
+    const hasMore = nextOffset < total;
+
+    return {
+      posts: rows.map((row) => ({
+        id: row.postId,
+        releaseId: row.postId,
+        releaseURL: row.releaseURL || undefined,
+        content: row.content,
+        publishDate: row.publishDate.toISOString(),
+        thumbnail: row.thumbnail || undefined,
+        commentCount: row.commentCount,
+        likeCount: row.likeCount,
+      })),
+      total,
+      page: 0,
+      limit,
+      hasMore,
+      next: hasMore ? String(nextOffset) : undefined,
+    };
+  }
+
+  /**
+   * Walks the provider's timeline backwards in slices and caches what it finds.
+   *
+   * Runs detached: the first pass over a dormant account is thousands of
+   * requests, so callers fire it and read whatever is cached so far. Progress
+   * is persisted after every batch, so a restart resumes instead of starting
+   * over, and the whole thing is deliberately slow — see PACE_MS.
+   */
+  private async crawlCommentPosts(
+    integration: Integration,
+    provider: SocialProvider
+  ) {
+    const sliceMs = provider.commentPostsSliceMs;
+    if (!sliceMs || !provider.fetchCommentPosts) {
+      return;
+    }
+
+    if (IntegrationService.crawlingCommentPosts.has(integration.id)) {
+      return;
+    }
+    IntegrationService.crawlingCommentPosts.add(integration.id);
+
+    // Stay well under any per-app quota: this is a background backfill, it has
+    // no deadline, and the account is shared with whatever else uses the app.
+    const PACE_MS = 250;
+    const BATCH = 20;
+    // 5 years back: this account's oldest visible posts are ~4 years old, and a
+    // shorter floor would drop history the screen shows today.
+    const FLOOR = dayjs().subtract(5, 'years').valueOf();
+    const RATE_LIMIT_BACKOFF_MS = 30000;
+    const MAX_RATE_LIMIT_RETRIES = 5;
+
+    let cursor = Number(integration.commentPostsCursor) || dayjs().valueOf();
+    let sinceSave = 0;
+    let rateLimitHits = 0;
+
+    try {
+      while (cursor > FLOOR) {
+        let page;
+        try {
+          page = await provider.fetchCommentPosts(
+            integration.internalId,
+            integration.token,
+            integration,
+            20,
+            String(cursor)
+          );
+          rateLimitHits = 0;
+        } catch (err: any) {
+          if (err?.name === 'TiktokBusinessRateLimit') {
+            rateLimitHits++;
+            if (rateLimitHits > MAX_RATE_LIMIT_RETRIES) {
+              // Give up for now rather than hammering — the saved cursor means
+              // the next visit picks up exactly here.
+              break;
+            }
+
+            // Exponential backoff, then retry the same slice.
+            await timer(RATE_LIMIT_BACKOFF_MS * Math.pow(2, rateLimitHits - 1));
+            continue;
+          }
+
+          if (err instanceof RefreshToken) {
+            // Token died mid-crawl; stop and let the next request refresh it.
+            break;
+          }
+
+          throw err;
+        }
+
+        const posts = page.posts || [];
+        if (posts.length) {
+          await this._integrationRepository.saveCachedCommentPosts(
+            integration.id,
+            posts.map((post) => ({
+              postId: post.id,
+              content: post.content,
+              publishDate: new Date(post.publishDate),
+              releaseURL: post.releaseURL,
+              thumbnail: post.thumbnail,
+              commentCount: post.commentCount,
+              likeCount: post.likeCount,
+            }))
+          );
+        }
+
+        // A full page means the window may hold more than we got, so resume
+        // from the oldest post rather than stepping past it. A short page means
+        // the slice is exhausted and we can step a whole slice back — which is
+        // also what makes dense stretches cheap to crawl.
+        const oldest = posts.length
+          ? Math.min(
+              ...posts.map((post) => new Date(post.publishDate).getTime())
+            )
+          : undefined;
+
+        cursor =
+          posts.length >= 20 && oldest
+            ? oldest - 1000
+            : Math.min(cursor - sliceMs, oldest ? oldest - 1000 : Infinity);
+
+        if (++sinceSave >= BATCH) {
+          sinceSave = 0;
+          await this._integrationRepository.saveCommentPostsCrawlState(
+            integration.id,
+            { cursor: String(cursor), syncedAt: new Date() }
+          );
+        }
+
+        await timer(PACE_MS);
+      }
+
+      await this._integrationRepository.saveCommentPostsCrawlState(
+        integration.id,
+        {
+          cursor: String(cursor),
+          done: cursor <= FLOOR,
+          syncedAt: new Date(),
+        }
+      );
+    } catch (err) {
+      // Never let a background crawl take down the request that started it.
+      await this._integrationRepository
+        .saveCommentPostsCrawlState(integration.id, {
+          cursor: String(cursor),
+          syncedAt: new Date(),
+        })
+        .catch(() => null);
+    } finally {
+      IntegrationService.crawlingCommentPosts.delete(integration.id);
     }
   }
 

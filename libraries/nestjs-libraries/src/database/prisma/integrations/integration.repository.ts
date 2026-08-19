@@ -16,8 +16,77 @@ export class IntegrationRepository {
     private _plugs: PrismaRepository<'plugs'>,
     private _exisingPlugData: PrismaRepository<'exisingPlugData'>,
     private _customers: PrismaRepository<'customer'>,
-    private _mentions: PrismaRepository<'mentions'>
+    private _mentions: PrismaRepository<'mentions'>,
+    private _commentPosts: PrismaRepository<'commentPost'>
   ) {}
+
+  // --- comment-post cache -------------------------------------------------
+  // Posts for the comment screen are cached because TikTok Business can only be
+  // crawled in slices; see CommentPost in schema.prisma.
+
+  // Offset paging rather than keyset: posts routinely share an exact publish
+  // timestamp (TikTok bulk uploads), so a `publishDate < last` cursor would
+  // silently drop the ties.
+  getCachedCommentPosts(integrationId: string, limit: number, offset = 0) {
+    return this._commentPosts.model.commentPost.findMany({
+      where: { integrationId },
+      orderBy: [{ publishDate: 'desc' }, { postId: 'desc' }],
+      skip: offset,
+      take: limit,
+    });
+  }
+
+  countCachedCommentPosts(integrationId: string) {
+    return this._commentPosts.model.commentPost.count({
+      where: { integrationId },
+    });
+  }
+
+  async saveCachedCommentPosts(
+    integrationId: string,
+    posts: {
+      postId: string;
+      content: string;
+      publishDate: Date;
+      releaseURL?: string;
+      thumbnail?: string;
+      commentCount?: number;
+      likeCount?: number;
+    }[]
+  ) {
+    for (const post of posts) {
+      const value = {
+        content: post.content,
+        publishDate: post.publishDate,
+        releaseURL: post.releaseURL,
+        thumbnail: post.thumbnail,
+        commentCount: post.commentCount ?? 0,
+        likeCount: post.likeCount ?? 0,
+      };
+
+      await this._commentPosts.model.commentPost.upsert({
+        where: { integrationId_postId: { integrationId, postId: post.postId } },
+        create: { integrationId, postId: post.postId, ...value },
+        update: value,
+      });
+    }
+  }
+
+  saveCommentPostsCrawlState(
+    integrationId: string,
+    state: { cursor?: string; done?: boolean; syncedAt?: Date }
+  ) {
+    return this._integration.model.integration.update({
+      where: { id: integrationId },
+      data: {
+        ...(state.cursor !== undefined
+          ? { commentPostsCursor: state.cursor }
+          : {}),
+        ...(state.done !== undefined ? { commentPostsDone: state.done } : {}),
+        ...(state.syncedAt ? { commentPostsSyncedAt: state.syncedAt } : {}),
+      },
+    });
+  }
 
   getMentions(platform: string, q: string) {
     return this._mentions.model.mentions.findMany({

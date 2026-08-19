@@ -158,6 +158,14 @@ export interface ISocialMediaIntegration {
     integration: Integration
   ): Promise<{ id: string; hidden: boolean }>;
 
+  /**
+   * Set by providers whose post listing can only be walked in timeline slices
+   * (TikTok Business looks back a few hours from the cursor and no further).
+   * When present the backend crawls the timeline in slices of this width and
+   * serves the comment screen from the cached posts instead of calling live.
+   */
+  commentPostsSliceMs?: number;
+
   fetchCommentPosts?(
     id: string,
     accessToken: string,

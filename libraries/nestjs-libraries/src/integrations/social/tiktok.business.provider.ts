@@ -33,6 +33,23 @@ import { Rules } from '@gitroom/nestjs-libraries/chat/rules.description.decorato
 // bolting onto tiktok.provider.ts (whose tokens can't call these endpoints).
 const BASE = 'https://business-api.tiktok.com/open_api/v1.3';
 
+/**
+ * Thrown when TikTok throttles us. Separate from BadBody so callers can back
+ * off and resume rather than treating the slice as permanently failed.
+ */
+export class TiktokBusinessRateLimit extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'TiktokBusinessRateLimit';
+  }
+}
+
+// TikTok's rate-limit codes are not documented consistently across the business
+// surfaces, so match on the message as well as the codes we have seen.
+const isRateLimited = (code: number, message?: string) =>
+  [40016, 40100, 40133, 50002].includes(code) ||
+  /rate.?limit|too many requests|qps|frequen/i.test(String(message || ''));
+
 @Rules(
   'TikTok Business is a comment-management only channel, it cannot publish posts'
 )
@@ -59,6 +76,10 @@ export class TiktokBusinessProvider
     'comment.list.manage',
   ];
   editor = 'normal' as const;
+  // Measured against the live API: a cursor stops seeing a post roughly 6-12h
+  // older than itself, so the timeline has to be crawled in 6h slices to avoid
+  // silently skipping sparse posts.
+  commentPostsSliceMs = 6 * 60 * 60 * 1000;
 
   maxLength() {
     // TikTok caps comment replies at 150 characters.
@@ -237,146 +258,57 @@ export class TiktokBusinessProvider
     limit = 25,
     cursor?: string
   ): Promise<SocialCommentPostsPage> {
-    const safeLimit = Math.min(Math.max(Number(limit) || 25, 1), 100);
+    // One slice per call. TikTok's cursor only looks back a few hours (measured:
+    // a post 12h older than the cursor is already invisible), so the timeline
+    // cannot be walked usefully from here — the backend crawls it in
+    // commentPostsSliceMs steps and caches the result, and this just fetches
+    // whichever slice the crawler asks for.
+    const data = await this.call<any>('/business/video/list/', accessToken, {
+      query: {
+        business_id: id,
+        // Field names verified against the live API: the thumbnail is
+        // `thumbnail_url` (`cover_image_url` is rejected with 40002) and the
+        // counts are `likes`/`comments`, not like_count/comment_count.
+        fields: [
+          'item_id',
+          'create_time',
+          'caption',
+          'share_url',
+          'thumbnail_url',
+          'likes',
+          'comments',
+        ],
+        // Hard cap: "Max_count needs to be in the range of [1, 20]".
+        max_count: 20,
+        cursor,
+      },
+    });
 
-    // TikTok pages this endpoint by timestamp, NOT by item. It walks backwards
-    // from the cursor and returns an empty page (with has_more=true) whenever
-    // the stretch it scanned holds no posts, and how far it scans back is not
-    // fixed — verified live it reached 5 months back in one region and under 2
-    // weeks in another. The default page starts at "now", so a dormant account
-    // returns nothing at all: 40 sequential pages covered 4 months and found
-    // zero videos.
-    //
-    // So the descent below jumps the cursor back by a doubling interval over
-    // empty stretches (reaches a 14-month-old post in ~8 requests instead of
-    // ~150), and the climb afterwards undoes the overshoot that causes.
-    const DAY_MS = 24 * 60 * 60 * 1000;
-    // TikTok caps this endpoint at max_count 20 ("Max_count needs to be in the
-    // range of [1, 20]", verified live) — request pages of 20 and accumulate.
-    const PAGE_SIZE = Math.min(safeLimit, 20);
-    const EMPTY_JUMP_START = 7 * DAY_MS;
-    const MAX_REQUESTS = 16;
-    const MAX_CLIMB = 6;
-
-    const posts: SocialCommentPost[] = [];
-    // Cursor jumps can land on a window overlapping one already fetched, so
-    // guard against adding the same video twice.
-    const seen = new Set<string>();
-    let newestSeconds = 0;
-
-    const collect = (videos: any[]) => {
-      let added = 0;
-      for (const v of videos) {
-        const key = String(v.item_id);
-        if (seen.has(key)) {
-          continue;
-        }
-        seen.add(key);
-        added++;
-        const createdAt = Number(v.create_time) || 0;
-        newestSeconds = Math.max(newestSeconds, createdAt);
-        posts.push({
-          id: key,
-          releaseId: key,
-          releaseURL: v.share_url,
-          content: v.caption || 'TikTok video',
-          publishDate: createdAt ? dayjs.unix(createdAt).toISOString() : '',
-          thumbnail: v.thumbnail_url,
-          commentCount: Number(v.comments ?? 0),
-          likeCount: Number(v.likes ?? 0),
-        });
-      }
-      return added;
-    };
-
-    const listVideos = async (at?: string) => {
-      const data = await this.call<any>('/business/video/list/', accessToken, {
-        query: {
-          business_id: id,
-          // Field names verified against the live API: the thumbnail is
-          // `thumbnail_url` (`cover_image_url` is rejected with 40002) and the
-          // counts are `likes`/`comments`, not like_count/comment_count.
-          fields: [
-            'item_id',
-            'create_time',
-            'caption',
-            'share_url',
-            'thumbnail_url',
-            'likes',
-            'comments',
-          ],
-          max_count: PAGE_SIZE,
-          cursor: at,
-        },
-      });
+    const posts: SocialCommentPost[] = (data?.videos || []).map((v: any) => {
+      const createdAt = Number(v.create_time) || 0;
       return {
-        videos: (data?.videos || []) as any[],
-        hasMore: !!data?.has_more,
-        cursor: data?.cursor ? Number(data.cursor) : undefined,
+        id: String(v.item_id),
+        releaseId: String(v.item_id),
+        releaseURL: v.share_url,
+        content: v.caption || 'TikTok video',
+        publishDate: createdAt ? dayjs.unix(createdAt).toISOString() : '',
+        thumbnail: v.thumbnail_url,
+        commentCount: Number(v.comments ?? 0),
+        likeCount: Number(v.likes ?? 0),
       };
-    };
+    });
 
-    let next = cursor;
-    let hasMore = true;
-    let emptyJump = EMPTY_JUMP_START;
-
-    for (let i = 0; i < MAX_REQUESTS && posts.length < safeLimit; i++) {
-      const page = await listVideos(next);
-      hasMore = page.hasMore;
-      const found = collect(page.videos);
-
-      if (!hasMore || !page.cursor) {
-        break;
-      }
-
-      if (found) {
-        emptyJump = EMPTY_JUMP_START;
-        next = String(page.cursor);
-      } else {
-        next = String(page.cursor - emptyJump);
-        emptyJump *= 2;
-      }
-    }
-
-    // The doubling descent can leap straight past a sparse account's most
-    // recent posts (verified live: it landed on February while the newest post
-    // was that June). Only the first page is affected — later pages are already
-    // walking downwards — so climb back up from the newest post found, probing
-    // a month above it until nothing newer comes back.
-    if (!cursor && newestSeconds) {
-      let climb = 30 * DAY_MS;
-      for (let i = 0; i < MAX_CLIMB; i++) {
-        const above = newestSeconds;
-        const page = await listVideos(String(above * 1000 + climb));
-        collect(page.videos);
-        if (newestSeconds > above) {
-          // Found newer posts — restart the probe close to the new high-water
-          // mark, since TikTok only looks back a short way from the cursor.
-          climb = 30 * DAY_MS;
-        } else {
-          climb *= 2;
-        }
-      }
-    }
-
-    // Each page arrives newest-first and we walk backwards, so this is already
-    // the natural order — but sort explicitly so the list is guaranteed
-    // latest-to-oldest however the cursor jumps and the climb interleaved.
-    // publishDate is an ISO string, which sorts chronologically as text.
     posts.sort((a, b) =>
       (b.publishDate || '').localeCompare(a.publishDate || '')
     );
 
-    // Return everything fetched rather than trimming to safeLimit: `next` has
-    // already advanced past the whole last page, so anything trimmed here would
-    // be skipped by the following request and lost from the list entirely.
     return {
       posts,
       total: posts.length,
       page: 0,
-      limit: safeLimit,
-      hasMore,
-      next: hasMore ? next : undefined,
+      limit: Math.min(Math.max(Number(limit) || 20, 1), 20),
+      hasMore: !!data?.has_more,
+      next: data?.cursor ? String(data.cursor) : undefined,
     };
   }
 
@@ -573,9 +505,19 @@ export class TiktokBusinessProvider
     // surface returns a string code (which would otherwise invert the checks).
     const code = Number(json?.code ?? 0);
     if (code !== 0) {
+      // Rate limiting arrives as HTTP 200 with a code/message in the body, so
+      // SocialAbstract's 429 handling never sees it. Check this BEFORE the
+      // token codes: a throttled call must not be mistaken for a dead token
+      // and trigger a pointless reconnect.
+      if (isRateLimited(code, json?.message)) {
+        throw new TiktokBusinessRateLimit(
+          json?.message || 'TikTok Business rate limit reached'
+        );
+      }
+
       // Access-token problems -> RefreshToken so the service retries after a
       // token refresh (and ultimately prompts a reconnect if that fails).
-      if ([40001, 40100, 40104, 40105, 40110].includes(code)) {
+      if ([40001, 40104, 40105, 40110].includes(code)) {
         throw new RefreshToken(
           'tiktok-business',
           JSON.stringify(json),

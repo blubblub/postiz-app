@@ -334,6 +334,12 @@ model Integration {
   customerId            String?
   rootInternalId        String?
   additionalSettings    String?                @default("[]")
+  // Comment-post cache state. Providers whose listing API has to be crawled in
+  // timeline slices (TikTok Business) fill this in the background.
+  commentPostsCursor    String?
+  commentPostsDone      Boolean                @default(false)
+  commentPostsSyncedAt  DateTime?
+  commentPosts          CommentPost[]
   exisingPlugData       ExisingPlugData[]
   customer              Customer?              @relation(fields: [customerId], references: [id])
   organization          Organization           @relation(fields: [organizationId], references: [id])
@@ -353,6 +359,28 @@ model Integration {
   @@index([inBetweenSteps])
   @@index([refreshNeeded])
   @@index([disabled])
+}
+
+// Posts cached for the comment-moderation screen. TikTok Business only exposes
+// its video list through a cursor that looks back a few hours at a time, so the
+// list is crawled in the background and served from here instead of live.
+model CommentPost {
+  id            String      @id @default(uuid())
+  integrationId String
+  postId        String
+  content       String
+  publishDate   DateTime
+  releaseURL    String?
+  thumbnail     String?
+  commentCount  Int         @default(0)
+  likeCount     Int         @default(0)
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
+  integration   Integration @relation(fields: [integrationId], references: [id])
+
+  @@unique([integrationId, postId])
+  @@index([integrationId, publishDate])
+  @@index([integrationId])
 }
 
 model Signatures {

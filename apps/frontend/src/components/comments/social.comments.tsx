@@ -385,7 +385,7 @@ export const SocialComments = () => {
 
     return (await (
       await fetch(
-        `/integrations/comments/${currentIntegration.id}/posts?limit=25`
+        `/integrations/comments/${currentIntegration.id}/posts?limit=30`
       )
     ).json()) as PostsResponse;
   }, [currentIntegration?.id, fetch]);
@@ -479,7 +479,7 @@ export const SocialComments = () => {
         await fetch(
           `/integrations/comments/${
             currentIntegration.id
-          }/posts?limit=25&after=${encodeURIComponent(nextPostCursor)}`
+          }/posts?limit=30&after=${encodeURIComponent(nextPostCursor)}`
         )
       ).json()) as PostsResponse;
       setPosts((current) => {
