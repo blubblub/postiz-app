@@ -516,8 +516,15 @@ export class IntegrationService {
     );
 
     // Keep filling in the background — the first crawl of a long-dormant
-    // account takes minutes, so it must not block the response.
-    if (!integration.commentPostsDone) {
+    // account takes minutes, so it must not block the response. Once the
+    // history is done we still come back periodically, otherwise posts made
+    // after the backfill would never appear.
+    const staleAfter = dayjs().subtract(15, 'minutes');
+    const stale =
+      !integration.commentPostsSyncedAt ||
+      dayjs(integration.commentPostsSyncedAt).isBefore(staleAfter);
+
+    if (!integration.commentPostsDone || stale) {
       this.crawlCommentPosts(integration, provider);
     }
 
@@ -586,11 +593,24 @@ export class IntegrationService {
     const SCAN_WIDTH = 4;
     // 5 years back: this account's oldest visible posts are ~4 years old, and a
     // shorter floor would drop history the screen shows today.
-    const FLOOR = dayjs().subtract(5, 'years').valueOf();
+    const HISTORY_FLOOR = dayjs().subtract(5, 'years').valueOf();
     const RATE_LIMIT_BACKOFF_MS = 30000;
     const MAX_RATE_LIMIT_RETRIES = 5;
 
-    let cursor = Number(integration.commentPostsCursor) || dayjs().valueOf();
+    // Two modes. The backfill walks the whole history once, resuming from the
+    // saved cursor. After that we only re-scan the stretch since the last run,
+    // which is a handful of slices rather than years of timeline.
+    const catchUp = !!integration.commentPostsDone;
+    const FLOOR = catchUp
+      ? dayjs(integration.commentPostsSyncedAt || dayjs().subtract(7, 'days'))
+          // Overlap a day so nothing falls between two runs.
+          .subtract(1, 'day')
+          .valueOf()
+      : HISTORY_FLOOR;
+
+    let cursor = catchUp
+      ? dayjs().valueOf()
+      : Number(integration.commentPostsCursor) || dayjs().valueOf();
     let sinceSave = 0;
     let rateLimitHits = 0;
     let scanning = true;
@@ -674,7 +694,9 @@ export class IntegrationService {
           sinceSave = 0;
           await this._integrationRepository.saveCommentPostsCrawlState(
             integration.id,
-            { cursor: String(cursor), syncedAt: new Date() }
+            // In catch-up mode the backfill cursor is finished history — don't
+            // overwrite it with where this short scan happens to be.
+            catchUp ? { syncedAt: new Date() } : { cursor: String(cursor) }
           );
         }
 
@@ -683,19 +705,21 @@ export class IntegrationService {
 
       await this._integrationRepository.saveCommentPostsCrawlState(
         integration.id,
-        {
-          cursor: String(cursor),
-          done: cursor <= FLOOR,
-          syncedAt: new Date(),
-        }
+        catchUp
+          ? { done: true, syncedAt: new Date() }
+          : {
+              cursor: String(cursor),
+              done: cursor <= FLOOR,
+              syncedAt: new Date(),
+            }
       );
     } catch (err) {
       // Never let a background crawl take down the request that started it.
       await this._integrationRepository
-        .saveCommentPostsCrawlState(integration.id, {
-          cursor: String(cursor),
-          syncedAt: new Date(),
-        })
+        .saveCommentPostsCrawlState(
+          integration.id,
+          catchUp ? { syncedAt: new Date() } : { cursor: String(cursor) }
+        )
         .catch(() => null);
     } finally {
       IntegrationService.crawlingCommentPosts.delete(integration.id);
