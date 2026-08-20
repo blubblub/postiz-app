@@ -40,6 +40,10 @@ export class IntegrationListTool implements AgentToolInterface {
             name: z.string(),
             picture: z.string(),
             platform: z.string(),
+            // Without these a channel that needs reconnecting looks identical
+            // to a working one, and every call against it just fails.
+            disabled: z.boolean().optional(),
+            needsReconnect: z.boolean().optional(),
           })
         ),
       }),
@@ -58,6 +62,7 @@ export class IntegrationListTool implements AgentToolInterface {
               name: p.name,
               id: p.id,
               disabled: p.disabled,
+              needsReconnect: p.refreshNeeded,
               picture: p.picture || '/no-picture.jpg',
               platform: p.providerIdentifier,
               display: p.profile,

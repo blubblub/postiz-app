@@ -323,6 +323,76 @@ export class PublicIntegrationsController {
       }));
   }
 
+  // --- comments -----------------------------------------------------------
+  // Same four operations the comment screen uses, so scripts and the CLI can
+  // moderate without driving a browser session.
+
+  @Get('/integrations/:id/comment-posts')
+  async listCommentPosts(
+    @GetOrgFromRequest() org: Organization,
+    @Param('id') id: string,
+    @Query('limit') limit?: string,
+    @Query('after') after?: string
+  ) {
+    Sentry.metrics.count('public_api-request', 1);
+    return this._integrationService.fetchCommentPosts(
+      org.id,
+      id,
+      Number(limit || 30),
+      after
+    );
+  }
+
+  @Get('/integrations/:id/comment-posts/:postId/comments')
+  async listComments(
+    @GetOrgFromRequest() org: Organization,
+    @Param('id') id: string,
+    @Param('postId') postId: string,
+    @Query('after') after?: string
+  ) {
+    Sentry.metrics.count('public_api-request', 1);
+    return this._integrationService.fetchPostComments(
+      org.id,
+      id,
+      postId,
+      after
+    );
+  }
+
+  @Post('/integrations/:id/comment-posts/:postId/replies')
+  async replyToComment(
+    @GetOrgFromRequest() org: Organization,
+    @Param('id') id: string,
+    @Param('postId') postId: string,
+    @Body() body: { parentCommentId: string; message: string }
+  ) {
+    Sentry.metrics.count('public_api-request', 1);
+    return this._integrationService.replyToComment(
+      org.id,
+      id,
+      postId,
+      body.parentCommentId,
+      body.message
+    );
+  }
+
+  @Post('/integrations/:id/comment-posts/:postId/hide')
+  async hideComment(
+    @GetOrgFromRequest() org: Organization,
+    @Param('id') id: string,
+    @Param('postId') postId: string,
+    @Body() body: { commentId: string; hidden: boolean }
+  ) {
+    Sentry.metrics.count('public_api-request', 1);
+    return this._integrationService.hideComment(
+      org.id,
+      id,
+      postId,
+      body.commentId,
+      body.hidden
+    );
+  }
+
   @Get('/social/:integration')
   @CheckPolicies([AuthorizationActions.Create, Sections.CHANNEL])
   async getIntegrationUrl(
