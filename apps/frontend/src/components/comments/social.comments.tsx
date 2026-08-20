@@ -372,6 +372,18 @@ export const SocialComments = () => {
     );
   }, [activeIntegrations, currentIntegrationId]);
 
+  // The clicked channel, which may be one that can't be used yet. Selecting it
+  // used to be a no-op, leaving the red badge unexplained.
+  const brokenIntegration = useMemo(
+    () =>
+      sortedIntegrations.find(
+        (integration) =>
+          integration.id === currentIntegrationId &&
+          (integration.disabled || integration.refreshNeeded)
+      ),
+    [sortedIntegrations, currentIntegrationId]
+  );
+
   useEffect(() => {
     setSelectedPostId('');
     setPosts([]);
@@ -730,18 +742,13 @@ export const SocialComments = () => {
           {sortedIntegrations.map((integration) => (
             <div
               key={integration.id}
-              onClick={() => {
-                if (integration.disabled || integration.refreshNeeded) {
-                  return;
-                }
-                setCurrentIntegrationId(integration.id);
-              }}
+              onClick={() => setCurrentIntegrationId(integration.id)}
               className={clsx(
                 'flex gap-[12px] items-center group/profile justify-center hover:bg-boxHover rounded-e-[8px]',
                 currentIntegration?.id !== integration.id &&
                   'opacity-20 hover:opacity-100 cursor-pointer',
                 (integration.disabled || integration.refreshNeeded) &&
-                  'cursor-not-allowed opacity-40'
+                  'cursor-pointer opacity-40'
               )}
             >
               <div className="relative rounded-full flex justify-center items-center gap-[6px]">
@@ -779,6 +786,34 @@ export const SocialComments = () => {
           ))}
         </div>
       </div>
+      {brokenIntegration ? (
+        <div className="flex flex-1 flex-col items-center justify-center gap-[14px] bg-newBgColorInner p-[20px] text-center">
+          <div className="flex h-[46px] w-[46px] items-center justify-center rounded-full bg-red-500/15 text-[22px] text-red-300">
+            !
+          </div>
+          <div className="text-[24px] font-[500]">
+            {brokenIntegration.disabled
+              ? t('channel_disabled', 'This channel is disabled')
+              : t('channel_needs_reconnect', 'This channel needs reconnecting')}
+          </div>
+          <div className="max-w-[440px] text-[15px] text-textColor/70">
+            {brokenIntegration.disabled
+              ? t(
+                  'channel_disabled_help',
+                  'Enable it again from your channels to browse its comments.'
+                )
+              : t(
+                  'channel_needs_reconnect_help',
+                  'Its access token expired or was revoked, so the platform is refusing our requests. Reconnecting the channel signs in again and restores comment access.'
+                )}
+          </div>
+          <Button onClick={() => router.push('/third-party')}>
+            {brokenIntegration.disabled
+              ? t('manage_channels', 'Manage channels')
+              : t('reconnect_channel', 'Reconnect channel')}
+          </Button>
+        </div>
+      ) : (
       <div className="flex flex-1 flex-col gap-[16px] bg-newBgColorInner p-[20px] xl:grid xl:grid-cols-[minmax(280px,360px)_1fr]">
         <div className="flex min-h-0 flex-col rounded-[8px] border border-tableBorder bg-newBgColor p-[16px]">
           <div className="mb-[14px] flex items-center justify-between gap-[12px]">
@@ -964,6 +999,7 @@ export const SocialComments = () => {
           </div>
         </div>
       </div>
+      )}
     </>
   );
 };
