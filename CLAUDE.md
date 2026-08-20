@@ -60,3 +60,8 @@ const useCommunity = () => {
 - Linting of the project can run only from the root.
 - Use only pnpm.
 - The system is in production with many users, if you want to change something, you need to be sure that you are not breaking anything for existing users and a migration might be needed
+
+## Fork-specific instructions
+
+This is the blubblub fork. Deployment, production access, and fork-only
+conventions live in `AGENTS.md` — read it before touching the running instance.
