@@ -37,6 +37,12 @@ export class FacebookProvider extends SocialAbstract implements SocialProvider {
     'pages_manage_posts',
     'pages_manage_engagement',
     'pages_read_engagement',
+    // Comments are user-generated content, and the {post-id}/comments edge is
+    // refused with "(#200) Missing Permissions" without this — verified against
+    // a live Page token that had pages_read_engagement but not this: even
+    // fields=id was rejected. pages_read_engagement only covers the Page's own
+    // content, so the comment screen needs this to list anything at all.
+    'pages_read_user_content',
     'read_insights',
   ];
   override maxConcurrentJob = 500; // Facebook has reasonable rate limits
