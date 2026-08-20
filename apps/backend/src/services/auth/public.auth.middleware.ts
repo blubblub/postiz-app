@@ -11,12 +11,18 @@ export class PublicAuthMiddleware implements NestMiddleware {
     private _oauthService: OAuthService
   ) {}
   async use(req: Request, res: Response, next: NextFunction) {
-    const auth = (req.headers.authorization ||
+    const rawAuth = (req.headers.authorization ||
       req.headers.Authorization) as string;
-    if (!auth) {
+    if (!rawAuth) {
       res.status(HttpStatus.UNAUTHORIZED).json({ msg: 'No API Key found' });
       return;
     }
+
+    // The MCP endpoint expects `Authorization: Bearer <key>` while this one
+    // historically wanted the bare key, which is a pointless trap when both are
+    // driven by the same credential. Accept either form here.
+    const auth = rawAuth.replace(/^Bearer\s+/i, '').trim();
+
     try {
       if (auth.startsWith('pos_')) {
         const authorization = await this._oauthService.getOrgByOAuthToken(auth);

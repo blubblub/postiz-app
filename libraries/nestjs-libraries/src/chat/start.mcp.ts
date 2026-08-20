@@ -148,7 +148,12 @@ export const startMcp = async (app: INestApplication) => {
       return;
     }
 
-    const token = req.headers.authorization?.replace('Bearer ', '');
+    // Accept `Bearer <key>` or a bare key, case-insensitively — the public API
+    // middleware accepts both too, so the same credential works on either
+    // surface without the caller having to remember which wants a prefix.
+    const token = req.headers.authorization
+      ?.replace(/^Bearer\s+/i, '')
+      .trim();
     if (!token) {
       res.status(401).send('Missing Authorization header');
       return;
