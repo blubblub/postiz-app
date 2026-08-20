@@ -12,6 +12,10 @@ import { CommentPostListTool } from '@gitroom/nestjs-libraries/chat/tools/commen
 import { CommentListTool } from '@gitroom/nestjs-libraries/chat/tools/comment.list.tool';
 import { CommentReplyTool } from '@gitroom/nestjs-libraries/chat/tools/comment.reply.tool';
 import { CommentHideTool } from '@gitroom/nestjs-libraries/chat/tools/comment.hide.tool';
+import { PostListTool } from '@gitroom/nestjs-libraries/chat/tools/post.list.tool';
+import { PostDeleteTool } from '@gitroom/nestjs-libraries/chat/tools/post.delete.tool';
+import { NotificationListTool } from '@gitroom/nestjs-libraries/chat/tools/notification.list.tool';
+import { ChannelAnalyticsTool } from '@gitroom/nestjs-libraries/chat/tools/channel.analytics.tool';
 
 export const toolList = [
   IntegrationListTool,
@@ -28,4 +32,8 @@ export const toolList = [
   CommentListTool,
   CommentReplyTool,
   CommentHideTool,
+  PostListTool,
+  PostDeleteTool,
+  NotificationListTool,
+  ChannelAnalyticsTool,
 ];
