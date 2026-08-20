@@ -70,6 +70,14 @@ deploy** — this repo has no migration files. Regenerate types locally with
 `pnpm run prisma-generate` (it dirties `pnpm-lock.yaml`; revert that before
 committing).
 
+If a deploy fails, check disk before suspecting the code: every deploy leaves a
+tagged `ghcr.io/blubblub/postiz-app:integration-<sha>` image (~5.6GB), and
+`docker image prune` only drops *dangling* images, so they accumulated until the
+disk filled and layer extraction failed with `no space left on device`. The
+droplet's `/usr/local/bin/postiz-deploy` now keeps the 3 newest sha-tagged
+images and deletes the rest, and prints free disk on success. Deleted images are
+re-pullable from GHCR.
+
 Formatting: the codebase is prettier 2 (`trailingComma: es5`) but prettier 3 is
 installed, so running it rewrites whole files. Format by hand.
 
