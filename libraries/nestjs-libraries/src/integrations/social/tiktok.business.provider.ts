@@ -329,6 +329,11 @@ export class TiktokBusinessProvider
         video_id: postId,
         // TikTok caps this at 30 ("max_count: number must be most 30").
         max_count: 30,
+        // Ask for hidden comments explicitly. ALL is the current default, but
+        // relying on that would silently drop every hidden comment from the
+        // moderation screen if it ever changed. ALL and PUBLIC are the only
+        // accepted values (verified live).
+        status: 'ALL',
         cursor,
       },
     });
