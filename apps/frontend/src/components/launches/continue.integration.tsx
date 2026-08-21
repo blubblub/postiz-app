@@ -82,6 +82,17 @@ export const ContinueIntegration: FC<{
       };
     }
 
+    // The advertiser callback carries BOTH `code` and `auth_code`, with
+    // DIFFERENT values, and only `auth_code` can be exchanged — so the
+    // precedence is the reverse of the tt_user flow above.
+    if (provider === 'tiktok-business-ads') {
+      return {
+        state: searchParams.state || '',
+        code: searchParams.auth_code || searchParams.code || '',
+        refresh: searchParams.refresh || '',
+      };
+    }
+
     if (provider === 'vk') {
       return {
         ...searchParams,
