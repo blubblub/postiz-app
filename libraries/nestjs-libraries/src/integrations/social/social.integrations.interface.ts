@@ -80,6 +80,11 @@ export type SocialCommentPost = {
   thumbnail?: string;
   commentCount?: number;
   likeCount?: number;
+  /**
+   * The post exists only as an ad, or was created by one. Dark posts have no
+   * public permalink, so `releaseURL` is usually missing on these.
+   */
+  isAd?: boolean;
 };
 
 export type SocialCommentPostsPage = {
@@ -247,6 +252,14 @@ export interface SocialProvider
   oneTimeToken?: boolean;
   isBetweenSteps: boolean;
   scopes: string[];
+  /**
+   * Asked for in the auth dialog, but not required to connect. `checkScopes` is
+   * all-or-nothing, so a scope the platform may refuse to grant belongs here
+   * rather than in `scopes` — Meta withholds the ads_* permissions until App
+   * Review, and listing them as required would fail the whole connection
+   * instead of just the feature that needs them.
+   */
+  optionalScopes?: string[];
   externalUrl?: (
     url: string
   ) => Promise<{ client_id: string; client_secret: string }>;

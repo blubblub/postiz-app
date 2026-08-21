@@ -14,7 +14,7 @@ export class CommentPostListTool implements AgentToolInterface {
   run() {
     return createTool({
       id: 'commentPostList',
-      description: `List the published posts of a channel that can have their comments moderated. Use the integrationList tool first to get the channel id. Returns the post ids needed by the commentList tool, newest first. Only some platforms support this (Facebook, Instagram, TikTok Business).`,
+      description: `List the posts of a channel that can have their comments moderated, including its ads. Use the integrationList tool first to get the channel id. Returns the post ids needed by the commentList tool, newest first within a page — ads are listed alongside organic posts and an older ad can appear on an earlier page than a newer organic post. \`isAd\` marks a post that is an ad — ads only appear when the channel granted the ads permission. Only some platforms support this (Facebook, Instagram, TikTok Business; TikTok Business is organic posts only).`,
       inputSchema: z.object({
         integrationId: z
           .string()
@@ -46,6 +46,7 @@ export class CommentPostListTool implements AgentToolInterface {
             url: z.string().optional(),
             commentCount: z.number().optional(),
             likeCount: z.number().optional(),
+            isAd: z.boolean().optional(),
           })
         ),
         // TikTok Business is served from a cache that fills in the background,
@@ -72,6 +73,7 @@ export class CommentPostListTool implements AgentToolInterface {
             url: post.releaseURL,
             commentCount: post.commentCount,
             likeCount: post.likeCount,
+            isAd: post.isAd,
           })),
           syncing: page.syncing,
           next: page.next,

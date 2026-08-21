@@ -26,6 +26,7 @@ const allowedIntegrations = [
   'instagram',
   'instagram-standalone',
   'tiktok-business',
+  'tiktok-business-ads',
 ];
 
 type IntegrationItem = {
@@ -47,6 +48,8 @@ type CommentPost = {
   thumbnail?: string;
   commentCount?: number;
   likeCount?: number;
+  /** The post is an ad (often a dark post with no public permalink). */
+  isAd?: boolean;
   integration?: {
     id: string;
     providerIdentifier: string;
@@ -503,10 +506,17 @@ export const SocialComments = () => {
       ).json()) as PostsResponse;
       setPosts((current) => {
         const ids = new Set(current.map((post) => post.id));
-        return [
-          ...current,
-          ...(response.posts || []).filter((post) => !ids.has(post.id)),
-        ];
+        return orderBy(
+          [
+            ...current,
+            ...(response.posts || []).filter((post) => !ids.has(post.id)),
+          ],
+          // Ads and organic posts page independently, so a later page can carry
+          // something newer than what is already on screen. Re-sort rather than
+          // just appending, or the list stops being newest-first.
+          ['publishDate'],
+          ['desc']
+        );
       });
       setNextPostCursor(response.next);
     } finally {
@@ -892,6 +902,11 @@ export const SocialComments = () => {
                   </div>
                 </div>
                 <div className="mt-[10px] flex flex-wrap items-center gap-[8px] text-[12px] text-textColor/60">
+                  {post.isAd && (
+                    <span className="rounded-[4px] bg-forth/20 px-[6px] py-[2px] text-[11px] font-[500] text-forth">
+                      {t('ad', 'Ad')}
+                    </span>
+                  )}
                   <span>{formatDate(post.publishDate)}</span>
                   {typeof post.likeCount === 'number' && (
                     <span>{post.likeCount} likes</span>

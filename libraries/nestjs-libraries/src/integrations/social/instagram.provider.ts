@@ -4,6 +4,7 @@ import {
   PostDetails,
   PostResponse,
   SocialComment,
+  SocialCommentPost,
   SocialCommentPostsPage,
   SocialCommentsPage,
   SocialProvider,
@@ -20,6 +21,14 @@ import { Integration } from '@prisma/client';
 import { Rules } from '@gitroom/nestjs-libraries/chat/rules.description.decorator';
 import { Tool } from '@gitroom/nestjs-libraries/integrations/tool.decorator';
 import { hasExtension } from '@gitroom/helpers/utils/has.extension';
+import { chunk } from 'lodash';
+import {
+  adsByCreativeId,
+  fetchMetaAds,
+} from '@gitroom/nestjs-libraries/integrations/social/meta.ads';
+
+// Ceiling on the optional ad-media walk so it can never dominate a screen load.
+const ADS_LOOKUP_TIMEOUT_MS = 8000;
 
 @Rules(
   "Instagram should have at least one attachment, if it's a story, it can have only one picture"
@@ -41,6 +50,11 @@ export class InstagramProvider
     'instagram_manage_comments',
     'instagram_manage_insights',
   ];
+  // Only needed to discover the media behind ads. Deliberately NOT in `scopes`:
+  // checkScopes() rejects the whole connection when one scope is missing, and
+  // Meta withholds ads_* until App Review — requiring them would break
+  // connecting Instagram at all rather than just hiding ad posts.
+  optionalScopes = ['ads_read', 'ads_management'];
   override maxConcurrentJob = 400;
   editor = 'normal' as const;
   dto = InstagramDto;
@@ -425,7 +439,9 @@ export class InstagramProvider
           `${process.env.FRONTEND_URL}/integrations/social/instagram`
         )}` +
         `&state=${state}` +
-        `&scope=${encodeURIComponent(this.scopes.join(','))}`,
+        `&scope=${encodeURIComponent(
+          [...this.scopes, ...this.optionalScopes].join(',')
+        )}`,
       codeVerifier: makeId(10),
       state,
     };
@@ -979,33 +995,11 @@ export class InstagramProvider
     return { id: String(commentId), hidden };
   }
 
-  async fetchCommentPosts(
-    id: string,
-    token: string,
-    integration: Integration,
-    limit = 25,
-    cursor?: string,
-    type = 'graph.facebook.com'
-  ): Promise<SocialCommentPostsPage> {
-    const [accessToken] = token.split('___');
-    const safeLimit = Math.min(Math.max(Number(limit) || 25, 1), 100);
-    const params = new URLSearchParams({
-      access_token: accessToken,
-      fields:
-        'id,caption,media_type,media_url,thumbnail_url,permalink,timestamp,comments_count,like_count',
-      limit: String(safeLimit),
-    });
-    if (cursor) {
-      params.set('after', cursor);
-    }
-    const response = await (
-      await this.fetch(
-        `https://${type}/v20.0/${id}/media?${params.toString()}`,
-        {},
-        'fetch comment posts'
-      )
-    ).json();
-    const posts = (response.data || []).map((post: any) => ({
+  private static readonly MEDIA_FIELDS =
+    'id,caption,media_type,media_url,thumbnail_url,permalink,timestamp,comments_count,like_count';
+
+  private static toCommentPost(post: any, isAd = false): SocialCommentPost {
+    return {
       id: String(post.id),
       releaseId: String(post.id),
       releaseURL: post.permalink,
@@ -1014,15 +1008,177 @@ export class InstagramProvider
       thumbnail: post.thumbnail_url || post.media_url,
       commentCount: Number(post.comments_count || 0),
       likeCount: Number(post.like_count || 0),
-    }));
+      ...(isAd ? { isAd: true } : {}),
+    };
+  }
+
+  /**
+   * The media behind this account's ads. `/{ig-user-id}/media` structurally
+   * never returns ad media — Meta is explicit that its counts "don't include
+   * data from ads" — so discovery goes through the Marketing API. See
+   * meta.ads.ts.
+   */
+  private async fetchAdMedia(
+    igUserId: string,
+    userToken: string
+  ): Promise<SocialCommentPost[]> {
+    const ads = await fetchMetaAds(
+      userToken,
+      [
+        'effective_instagram_media_id',
+        'instagram_permalink_url',
+        'instagram_user_id',
+      ],
+      (url) => this.fetch(url, {}, 'fetch ads')
+    );
+
+    const byMediaId = adsByCreativeId(
+      ads,
+      'effective_instagram_media_id',
+      // instagram_user_id is only a hint — it is empty on creatives that inherit
+      // their identity, so it can exclude but never confirm.
+      (ad) => {
+        const actor = ad?.creative?.instagram_user_id;
+        return !actor || String(actor) === String(igUserId);
+      }
+    );
+
+    if (!byMediaId.size) {
+      return [];
+    }
+
+    const ids = [...byMediaId.keys()];
+    // Graph's batch-get caps `ids` at 50 and is atomic — one unreadable id
+    // fails the whole request — so chunk it. Ad media is documented for the
+    // /comments edge but the media node itself is not promised, so a failed
+    // chunk costs those cards their thumbnail and counts, not the posts.
+    const media: Record<string, any> = Object.assign(
+      {},
+      ...(await Promise.all(
+        chunk(ids, 50).map((batch) =>
+          this.fetch(
+            `https://graph.facebook.com/v20.0/?ids=${batch.join(
+              ','
+            )}&fields=${InstagramProvider.MEDIA_FIELDS}&access_token=${userToken}`,
+            {},
+            'fetch ad media'
+          )
+            .then((response) => response.json())
+            .catch(() => ({}))
+        )
+      ))
+    );
+
+    return ids.map((mediaId) => {
+      const found = media?.[mediaId];
+      if (found?.id) {
+        return InstagramProvider.toCommentPost(found, true);
+      }
+
+      const ad = byMediaId.get(mediaId);
+      const createdAt = ad?.created_time ? new Date(ad.created_time) : undefined;
+      return {
+        id: String(mediaId),
+        releaseId: String(mediaId),
+        releaseURL: ad?.creative?.instagram_permalink_url,
+        content: ad?.name || 'Instagram ad',
+        // The Marketing API renders created_time in the ad account's timezone
+        // while media timestamps are UTC, and the list is sorted by string
+        // compare — normalise so an offset can't reorder the feed.
+        publishDate:
+          createdAt && !Number.isNaN(createdAt.getTime())
+            ? createdAt.toISOString()
+            : ad?.created_time,
+        isAd: true,
+      };
+    });
+  }
+
+  async fetchCommentPosts(
+    id: string,
+    token: string,
+    integration: Integration,
+    limit = 25,
+    cursor?: string,
+    type = 'graph.facebook.com'
+  ): Promise<SocialCommentPostsPage> {
+    const [accessToken, userToken] = token.split('___');
+    const safeLimit = Math.min(Math.max(Number(limit) || 25, 1), 100);
+    const params = new URLSearchParams({
+      access_token: accessToken,
+      fields: InstagramProvider.MEDIA_FIELDS,
+      limit: String(safeLimit),
+    });
+    if (cursor) {
+      params.set('after', cursor);
+    }
+
+    // Ads come from a separate API with its own paging, so they ride along on
+    // the first page only rather than being threaded through the media cursor.
+    // The instagram-standalone channel delegates here with the Instagram Login
+    // host and no user token — it has no ad surface at all, so it skips this.
+    const wantsAds = !cursor && type === 'graph.facebook.com' && !!userToken;
+
+    const [response, adPosts] = await Promise.all([
+      // Not `(await this.fetch(...)).json()` — awaiting inside the array literal
+      // runs this to completion before the ads walk below is even started.
+      this.fetch(
+        `https://${type}/v20.0/${id}/media?${params.toString()}`,
+        {},
+        'fetch comment posts'
+      ).then((mediaResponse) => mediaResponse.json()),
+      wantsAds
+        ? Promise.race([
+            this.fetchAdMedia(id, userToken),
+            // The ads walk is 1 + N requests on the critical path, and
+            // SocialAbstract.fetch retries Meta's "unknown error" three times
+            // at 5s apart. Cap it so an optional extra can never turn the
+            // comment screen into a 30-second load; the posts show up on the
+            // next visit.
+            timer(ADS_LOOKUP_TIMEOUT_MS).then(() => [] as SocialCommentPost[]),
+          ]).catch(() => {
+            // No ads_read, or a user half that expired (a ~60 day token whose
+            // refreshToken() returns empty strings), so show the organic list
+            // rather than failing the screen. RefreshToken is swallowed on
+            // purpose: this branch is optional and the /media request beside it
+            // uses the page half, so it — not this — is the authority on
+            // whether the connection is still alive.
+            return [] as SocialCommentPost[];
+          })
+        : ([] as SocialCommentPost[]),
+    ]);
+
+    const organic = (response.data || []).map((post: any) =>
+      InstagramProvider.toCommentPost(post)
+    );
+
+    // Ad comments live on effective_instagram_media_id and organic ones on
+    // source_instagram_media_id, so the two sets are disjoint by construction —
+    // dedupe only guards against Meta returning the same id from both.
+    const byId = new Map<string, SocialCommentPost>();
+    for (const post of [...organic, ...adPosts]) {
+      if (!byId.has(post.id) || post.isAd) {
+        byId.set(post.id, post);
+      }
+    }
+
+    const posts = [...byId.values()].sort((a, b) =>
+      (b.publishDate || '').localeCompare(a.publishDate || '')
+    );
+
+    // `cursors.after` is returned on the last page too, so it must stay gated
+    // on paging.next — otherwise "load more" never stops.
+    const next = response.paging?.next
+      ? response.paging?.cursors?.after
+      : undefined;
 
     return {
       posts,
       total: posts.length,
       page: 0,
       limit: safeLimit,
-      hasMore: !!response.paging?.next,
-      next: response.paging?.next ? response.paging?.cursors?.after : undefined,
+      hasMore: !!next,
+      next,
     };
   }
 

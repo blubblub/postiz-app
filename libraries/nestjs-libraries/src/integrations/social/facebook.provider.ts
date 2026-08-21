@@ -4,6 +4,7 @@ import {
   PostDetails,
   PostResponse,
   SocialComment,
+  SocialCommentPost,
   SocialCommentPostsPage,
   SocialCommentsPage,
   SocialProvider,
@@ -23,6 +24,11 @@ import { Integration } from '@prisma/client';
 import { hasExtension } from '@gitroom/helpers/utils/has.extension';
 import { timer } from '@gitroom/helpers/utils/timer';
 import { Rules } from '@gitroom/nestjs-libraries/chat/rules.description.decorator';
+import {
+  adsByCreativeId,
+  fetchMetaAds,
+} from '@gitroom/nestjs-libraries/integrations/social/meta.ads';
+import { chunk } from 'lodash';
 
 @Rules(
   "Facebook posts can be text only, or include photos or a video. If it's a story, it must have at least one attachment (photo or video), and each media is published as a separate story."
@@ -45,6 +51,19 @@ export class FacebookProvider extends SocialAbstract implements SocialProvider {
     'pages_read_user_content',
     'read_insights',
   ];
+  // Only needed to discover the posts behind ads (dark posts). Deliberately NOT
+  // in `scopes`: checkScopes() rejects the entire connection when one scope is
+  // missing, and Meta grants ads_* only to users with a role on the app until
+  // App Review — requiring it would break connecting Facebook at all rather
+  // than just hiding ad posts.
+  //
+  // `pages_manage_ads` is deliberately absent. It is required by
+  // /{page-id}/ads_posts, but it is not offered by every app type — a legacy
+  // app-type app cannot be granted it at all — so ad posts are discovered
+  // through the Marketing API instead, which needs only ads_management. Asking
+  // for a permission the app can never hold just adds noise to the consent
+  // screen.
+  optionalScopes = ['ads_management'];
   override maxConcurrentJob = 500; // Facebook has reasonable rate limits
   editor = 'normal' as const;
   maxLength() {
@@ -252,7 +271,7 @@ export class FacebookProvider extends SocialAbstract implements SocialProvider {
           `${process.env.FRONTEND_URL}/integrations/social/facebook`
         )}` +
         `&state=${state}` +
-        `&scope=${this.scopes.join(',')}`,
+        `&scope=${[...this.scopes, ...this.optionalScopes].join(',')}`,
       codeVerifier: makeId(10),
       state,
     };
@@ -866,6 +885,96 @@ export class FacebookProvider extends SocialAbstract implements SocialProvider {
     return { id: String(commentId), hidden };
   }
 
+  private static readonly POST_FIELDS =
+    'id,message,story,created_time,permalink_url,full_picture,comments.limit(0).summary(true),likes.limit(0).summary(true)';
+
+  private static toCommentPost(post: any, isAd = false): SocialCommentPost {
+    return {
+      id: String(post.id),
+      releaseId: String(post.id),
+      releaseURL: post.permalink_url,
+      content: post.message || post.story || 'Facebook post',
+      publishDate: post.created_time,
+      thumbnail: post.full_picture,
+      commentCount: Number(post.comments?.summary?.total_count || 0),
+      likeCount: Number(post.likes?.summary?.total_count || 0),
+      ...(isAd ? { isAd: true } : {}),
+    };
+  }
+
+  /**
+   * The page posts behind this account's ads, including dark posts that were
+   * created inside an ad and never appear on /posts.
+   *
+   * Reached through the Marketing API rather than /{page-id}/ads_posts: that
+   * edge additionally requires pages_manage_ads, which some app types are never
+   * offered. The user token lives in Integration.refreshToken — the page token
+   * this provider is otherwise given cannot resolve `me` to a user.
+   */
+  private async fetchAdPosts(
+    pageId: string,
+    accessToken: string,
+    userToken: string
+  ): Promise<SocialCommentPost[]> {
+    const ads = await fetchMetaAds(
+      userToken,
+      ['effective_object_story_id'],
+      (url) => this.fetch(url, {}, 'fetch ads')
+    );
+
+    // Only this Page's ads: one ad account commonly promotes several Pages, and
+    // a story id is `<page-id>_<post-id>`.
+    const byPost = adsByCreativeId(ads, 'effective_object_story_id', (ad) =>
+      String(ad?.creative?.effective_object_story_id || '').startsWith(
+        `${pageId}_`
+      )
+    );
+
+    if (!byPost.size) {
+      return [];
+    }
+
+    const ids = [...byPost.keys()];
+
+    // Batched node read, with the PAGE token — reading a page post needs the
+    // page permissions, not the ads one. Graph caps `ids` at 50 and is atomic,
+    // so chunk it; a failed chunk costs those cards, not the whole listing.
+    const posts: Record<string, any> = Object.assign(
+      {},
+      ...(await Promise.all(
+        chunk(ids, 50).map((batch) =>
+          this.fetch(
+            `https://graph.facebook.com/v20.0/?ids=${batch.join(',')}&fields=${
+              FacebookProvider.POST_FIELDS
+            }&access_token=${accessToken}`,
+            {},
+            'fetch ad posts'
+          )
+            .then((response) => response.json())
+            .catch(() => ({}))
+        )
+      ))
+    );
+
+    return ids.map((postId) => {
+      const found = posts?.[postId];
+      if (found?.id) {
+        return FacebookProvider.toCommentPost(found, true);
+      }
+
+      // Dark posts can refuse a direct node read while their comments edge
+      // still works, so keep the card rather than dropping the post.
+      const ad = byPost.get(postId);
+      return {
+        id: postId,
+        releaseId: postId,
+        content: ad?.name || 'Facebook ad',
+        publishDate: ad?.created_time || new Date().toISOString(),
+        isAd: true,
+      };
+    });
+  }
+
   async fetchCommentPosts(
     id: string,
     accessToken: string,
@@ -876,38 +985,69 @@ export class FacebookProvider extends SocialAbstract implements SocialProvider {
     const safeLimit = Math.min(Math.max(Number(limit) || 25, 1), 100);
     const params = new URLSearchParams({
       access_token: accessToken,
-      fields:
-        'id,message,story,created_time,permalink_url,full_picture,comments.limit(0).summary(true),likes.limit(0).summary(true)',
+      fields: FacebookProvider.POST_FIELDS,
       limit: String(safeLimit),
     });
     if (cursor) {
       params.set('after', cursor);
     }
-    const response = await (
-      await this.fetch(
+
+    // The ads walk is a separate API with its own paging, so it rides along on
+    // the first page only rather than being threaded through the /posts cursor.
+    // The user token it needs is kept in refreshToken; Facebook's refreshToken()
+    // is a no-op stub, so nothing overwrites it.
+    const userToken = integration?.refreshToken || '';
+    const wantsAds = !cursor && !!userToken;
+
+    const [response, adPosts] = await Promise.all([
+      this.fetch(
         `https://graph.facebook.com/v20.0/${id}/posts?${params.toString()}`,
         {},
         'fetch comment posts'
-      )
-    ).json();
-    const posts = (response.data || []).map((post: any) => ({
-      id: String(post.id),
-      releaseId: String(post.id),
-      releaseURL: post.permalink_url,
-      content: post.message || post.story || 'Facebook post',
-      publishDate: post.created_time,
-      thumbnail: post.full_picture,
-      commentCount: Number(post.comments?.summary?.total_count || 0),
-      likeCount: Number(post.likes?.summary?.total_count || 0),
-    }));
+      ).then((postsResponse) => postsResponse.json()),
+      wantsAds
+        ? this.fetchAdPosts(id, accessToken, userToken).catch(() => {
+            // No ads_management, or an ad account we cannot read. Degrade to the
+            // organic list rather than failing the screen — and swallow
+            // RefreshToken too: handleErrors treats any body containing '490'
+            // as an expired token and fbtrace_ids contain '490' by chance, so
+            // letting this optional branch report token death would randomly
+            // flag a healthy channel as needing reconnection. The /posts call
+            // beside it is the authority on whether the token is alive.
+            return [] as SocialCommentPost[];
+          })
+        : ([] as SocialCommentPost[]),
+    ]);
+
+    const organic = (response.data || []).map((post: any) =>
+      FacebookProvider.toCommentPost(post)
+    );
+
+    // A boosted organic post shows up in both; keep the ad copy so it is badged.
+    const byId = new Map<string, SocialCommentPost>();
+    for (const post of [...organic, ...adPosts]) {
+      if (!byId.has(post.id) || post.isAd) {
+        byId.set(post.id, post);
+      }
+    }
+
+    const posts = [...byId.values()].sort((a, b) =>
+      (b.publishDate || '').localeCompare(a.publishDate || '')
+    );
+
+    // `cursors.after` is returned on the last page too, so it must stay gated on
+    // paging.next — otherwise "load more" never stops.
+    const next = response.paging?.next
+      ? response.paging?.cursors?.after
+      : undefined;
 
     return {
       posts,
       total: posts.length,
       page: 0,
       limit: safeLimit,
-      hasMore: !!response.paging?.next,
-      next: response.paging?.next ? response.paging?.cursors?.after : undefined,
+      hasMore: !!next,
+      next,
     };
   }
 
