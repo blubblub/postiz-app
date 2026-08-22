@@ -1,13 +1,8 @@
 /**
  * Self-check for the TikTok Ads (advertiser surface) comment provider.
  *
- * This provider is written against TikTok's published OpenAPI schemas and portal
- * docs but has never been run against the live API — an advertiser token needs a
- * human to complete business-api.tiktok.com/portal/auth. So the parts that are
- * OURS (grouping comments into posts, the composite id round-trip, which literal
- * goes in comment_type, HIDDEN vs HIDE) are pinned here, and the parts that are
- * TikTok's (field names, enums) are asserted as the exact request we send, so a
- * doc correction shows up as a failing line rather than a silent behaviour change.
+ * The request and response shapes are pinned to the live advertiser API so a
+ * future TikTok change fails here instead of silently emptying the comment screen.
  *
  *   npx tsx --tsconfig tsconfig.base.json var/checks/tiktok.ads.comments.ts
  */
@@ -73,7 +68,7 @@ const q = (url: string, name: string) =>
       page_info: { page: 1, total_page: 2 },
     });
     routes['/comment/list/'] = ok({
-      list: [
+      comments: [
         row({ comment_id: 'c1', tiktok_item_id: 'item1' }),
         row({ comment_id: 'c2', tiktok_item_id: 'item1', create_time: '2026-03-01' }),
         row({ comment_id: 'c3', tiktok_item_id: 'item2' }),
@@ -101,8 +96,35 @@ const q = (url: string, name: string) =>
     assert.strictEqual(q(listed[0].url, 'search_value'), 'ag1');
     assert.match(q(listed[0].url, 'start_time'), /^\d{4}-\d{2}-\d{2}$/,
       'start_time is a YYYY-MM-DD date, not an epoch');
+    assert.strictEqual(
+      (Date.parse(q(listed[0].url, 'end_time')) -
+        Date.parse(q(listed[0].url, 'start_time'))) /
+        (24 * 60 * 60 * 1000),
+      29,
+      'inclusive date bounds cover TikTok\'s maximum 30 calendar days'
+    );
     assert.strictEqual(q(listed[0].url, 'comment_status'), '["ALL"]',
       'hidden comments must stay listed or they could never be unhidden');
+  }
+
+  // ---- API failures surface instead of masquerading as an empty account
+  {
+    const { p, routes } = provider();
+    routes['/adgroup/get/'] = ok({
+      list: [{ adgroup_id: 'ag1', comment_disabled: false }],
+      page_info: { page: 1, total_page: 1 },
+    });
+    routes['/comment/list/'] = {
+      text: async () => JSON.stringify({
+        code: 40002,
+        message: 'The maximum allowed time span is 30 days.',
+      }),
+    };
+    await assert.rejects(
+      () => p.fetchCommentPosts('adv1', 'tok', {} as any, 25),
+      /maximum allowed time span/,
+      'TikTok errors must not render as a valid empty account'
+    );
   }
 
   // ---- create_time: three documented formats and an epoch, none of them unix()
@@ -119,7 +141,7 @@ const q = (url: string, name: string) =>
         page_info: { page: 1, total_page: 1 },
       });
       routes['/comment/list/'] = ok({
-        list: [row({ create_time: value })],
+        comments: [row({ create_time: value })],
         page_info: { page: 1, total_page: 1 },
       });
       const page = await p.fetchCommentPosts('adv1', 'tok', {} as any, 25);
@@ -136,7 +158,7 @@ const q = (url: string, name: string) =>
       page_info: { page: 1, total_page: 1 },
     });
     routes['/comment/list/'] = ok({
-      list: [row({ create_time: 'not a date' })],
+      comments: [row({ create_time: 'not a date' })],
       page_info: { page: 1, total_page: 1 },
     });
     const page = await p.fetchCommentPosts('adv1', 'tok', {} as any, 25);
@@ -148,7 +170,7 @@ const q = (url: string, name: string) =>
   {
     const { p, routes } = provider();
     routes['/comment/list/'] = ok({
-      list: [
+      comments: [
         row({ comment_id: 'top1', tiktok_item_id: 'item1' }),
         row({ comment_id: 'rep1', tiktok_item_id: 'item1',
           comment_type: 'REPLY', original_comment_id: 'top1' }),
@@ -204,7 +226,7 @@ const q = (url: string, name: string) =>
   {
     const { p, calls, routes } = provider();
     routes['/comment/list/'] = ok({
-      list: [row({ comment_id: 'c9', ad_id: 'adZ', identity_id: 'identZ' })],
+      comments: [row({ comment_id: 'c9', ad_id: 'adZ', identity_id: 'identZ' })],
       page_info: { page: 1, total_page: 1 },
     });
     routes['/comment/post/'] = ok({ comment_id: 'new2' });
@@ -218,7 +240,7 @@ const q = (url: string, name: string) =>
   // ---- reply: no identity anywhere is a clear error, not a malformed request
   {
     const { p, routes } = provider();
-    routes['/comment/list/'] = ok({ list: [], page_info: { page: 1, total_page: 1 } });
+    routes['/comment/list/'] = ok({ comments: [], page_info: { page: 1, total_page: 1 } });
     await assert.rejects(
       () => p.replyToComment('adv1', 'ag1:item1', 'c9', 'tok', 'hi', {} as any),
       /identity/i,

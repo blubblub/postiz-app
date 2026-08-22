@@ -52,11 +52,9 @@ const BASE = 'https://business-api.tiktok.com/open_api/v1.3';
 // '/', '?', '#' and '%' are not.
 const PART = ':';
 
-// ponytail: fixed lookback for /comment/list/, whose start_time/end_time are
-// required and whose maximum span is undocumented. Widen (or move to the sliced
-// crawler + CommentPost cache the organic provider uses) once a real advertiser
-// token shows what the API actually accepts.
-const LOOKBACK_DAYS = 365;
+// /comment/list/ rejects spans over 30 days. Both bounds are inclusive, so
+// subtract 29 days to cover 30 calendar days including today.
+const LOOKBACK_DAYS = 29;
 
 // Ad groups scanned per page of the comment screen. Each one costs a
 // /comment/list/ call, so this is the fan-out width of a single request.
@@ -287,9 +285,10 @@ export class TiktokBusinessAdsProvider
   // ---------------------------------------------------------------------------
 
   private window() {
+    const end = dayjs();
     return {
-      start_time: dayjs().subtract(LOOKBACK_DAYS, 'day').format('YYYY-MM-DD'),
-      end_time: dayjs().add(1, 'day').format('YYYY-MM-DD'),
+      start_time: end.subtract(LOOKBACK_DAYS, 'day').format('YYYY-MM-DD'),
+      end_time: end.format('YYYY-MM-DD'),
     };
   }
 
@@ -350,7 +349,7 @@ export class TiktokBusinessAdsProvider
 
     const info = data?.page_info || {};
     return {
-      rows: data?.list || [],
+      rows: data?.comments || [],
       hasMore: Number(info.page || page) < Number(info.total_page || page),
     };
   }
@@ -368,9 +367,7 @@ export class TiktokBusinessAdsProvider
     // Each ad group is one /comment/list/ call; they are independent, so fan out.
     const grouped = await Promise.all(
       ids.map(async (adGroupId) => {
-        const { rows } = await this.comments(id, accessToken, adGroupId).catch(
-          () => ({ rows: [] as any[], hasMore: false })
-        );
+        const { rows } = await this.comments(id, accessToken, adGroupId);
         return { adGroupId, rows };
       })
     );
