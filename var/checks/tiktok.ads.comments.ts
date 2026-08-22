@@ -107,6 +107,34 @@ const q = (url: string, name: string) =>
       'hidden comments must stay listed or they could never be unhidden');
   }
 
+  // ---- comment lists stay sequential to respect TikTok's live QPS limit
+  {
+    const { p, routes } = provider();
+    let inFlight = 0;
+    let maxInFlight = 0;
+    routes['/adgroup/get/'] = ok({
+      list: [
+        { adgroup_id: 'ag1', comment_disabled: false },
+        { adgroup_id: 'ag2', comment_disabled: false },
+      ],
+      page_info: { page: 1, total_page: 1 },
+    });
+    routes['/comment/list/'] = async (url: string) => {
+      inFlight++;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      await new Promise((resolve) => setTimeout(resolve, 1));
+      inFlight--;
+      return ok({
+        comments: [row({ tiktok_item_id: q(url, 'search_value') })],
+        page_info: { page: 1, total_page: 1 },
+      });
+    };
+
+    const page = await p.fetchCommentPosts('adv1', 'tok', {} as any, 25);
+    assert.strictEqual(maxInFlight, 1, 'comment-list calls must not overlap');
+    assert.strictEqual(page.posts.length, 2);
+  }
+
   // ---- API failures surface instead of masquerading as an empty account
   {
     const { p, routes } = provider();

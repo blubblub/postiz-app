@@ -364,13 +364,13 @@ export class TiktokBusinessAdsProvider
     const page = Math.max(Number(cursor) || 1, 1);
     const { ids, hasMore } = await this.adGroups(id, accessToken, page);
 
-    // Each ad group is one /comment/list/ call; they are independent, so fan out.
-    const grouped = await Promise.all(
-      ids.map(async (adGroupId) => {
-        const { rows } = await this.comments(id, accessToken, adGroupId);
-        return { adGroupId, rows };
-      })
-    );
+    // ponytail: sequential calls stay below TikTok's live QPS limit; add bounded
+    // concurrency only if a 20-group page becomes measurably too slow.
+    const grouped: { adGroupId: string; rows: any[] }[] = [];
+    for (const adGroupId of ids) {
+      const { rows } = await this.comments(id, accessToken, adGroupId);
+      grouped.push({ adGroupId, rows });
+    }
 
     // The ads surface has no "posts that have comments" endpoint, so posts are
     // derived by grouping comments on the item they were left on. A pleasant
