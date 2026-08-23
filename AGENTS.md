@@ -46,6 +46,15 @@ provider credentials explicitly, and the droplet keeps its own copy.
 Apply changes with `docker compose up -d postiz` in `/opt/postiz`, then confirm
 with `docker exec postiz printenv <VAR>`. Back up the override first.
 
+The override also carries a `healthcheck:` block for `postiz` probing
+`http://localhost:3000/` (backend port, not nginx's 5000) — added 2026-08-23
+after a hung backend boot 502'd the site for ~45 min while every layer
+reported healthy. The image's baked-in check hits nginx:5000, which stays up
+while the backend is hung. Boot-phase markers (`[boot] …` lines in
+`backend-out.log`) name the phase of any future pre-listen hang. The repo
+compose has the same check; the droplet's deploy script does not act on
+`unhealthy` yet — it only reports.
+
 ### Useful commands
 
 ```bash
