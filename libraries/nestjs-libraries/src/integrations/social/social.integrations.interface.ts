@@ -13,7 +13,7 @@ export interface IAuthenticator {
       refresh?: string;
     },
     clientInformation?: ClientInformation
-  ): Promise<AuthTokenDetails | string>;
+  ): Promise<AuthTokenDetails | AuthTokenDetails[] | string>;
   refreshToken(refreshToken: string): Promise<AuthTokenDetails>;
   reConnect?(
     id: string,

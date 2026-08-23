@@ -177,7 +177,7 @@ export class TiktokBusinessAdsProvider
     code: string;
     codeVerifier: string;
     refresh?: string;
-  }): Promise<AuthTokenDetails> {
+  }): Promise<AuthTokenDetails[]> {
     // Live-confirmed against the real app credentials: this endpoint takes
     // exactly app_id, secret and auth_code, all as JSON strings, and validates
     // the body schema BEFORE credentials. grant_type and redirect_uri are
@@ -200,11 +200,23 @@ export class TiktokBusinessAdsProvider
 
     const data = res?.data || {};
     const accessToken = data.access_token;
-    const advertiserId = String(
-      (data.advertiser_ids || [])[0] || data.advertiser_id || ''
-    );
+    const returnedAdvertiserIds = Array.isArray(data.advertiser_ids)
+      ? data.advertiser_ids
+      : [data.advertiser_ids];
+    const advertisers = accessToken ? await this.advertisers(accessToken) : [];
+    const advertiserIds = [
+      ...new Set<string>(
+        [
+          ...returnedAdvertiserIds,
+          data.advertiser_id,
+          ...advertisers.map((advertiser: any) => advertiser.advertiser_id),
+        ]
+          .map((id) => String(id || ''))
+          .filter(Boolean)
+      ),
+    ];
 
-    if (!accessToken || !advertiserId) {
+    if (!accessToken || !advertiserIds.length) {
       throw new BadBody(
         'tiktok-business-ads',
         JSON.stringify(res),
@@ -214,21 +226,27 @@ export class TiktokBusinessAdsProvider
       );
     }
 
-    const name = await this.advertiserName(accessToken, advertiserId);
+    const names = new Map(
+      advertisers.map((advertiser: any) => [
+        String(advertiser.advertiser_id),
+        advertiser.advertiser_name,
+      ])
+    );
+    const expiresIn = dayjs().add(1, 'year').unix() - dayjs().unix();
 
-    return {
+    return advertiserIds.map((advertiserId) => ({
       id: advertiserId,
-      name,
+      name: names.get(advertiserId) || `TikTok Ads ${advertiserId}`,
       accessToken,
       // The advertiser token is long-lived and has no refresh endpoint. Keeping
       // a copy here lets refreshToken() re-assert it instead of returning empty
       // strings, which the refresh path treats as a dead channel and
       // disconnects.
       refreshToken: accessToken,
-      expiresIn: dayjs().add(1, 'year').unix() - dayjs().unix(),
+      expiresIn,
       picture: '',
       username: advertiserId,
-    };
+    }));
   }
 
   /**
@@ -252,20 +270,21 @@ export class TiktokBusinessAdsProvider
   }
 
   private async firstAdvertiserId(accessToken: string): Promise<string> {
-    const data = await this.call<any>('/oauth2/advertiser/get/', accessToken, {
-      query: {
-        app_id: String(process.env.TIKTOK_BUSINESS_APP_ID),
-        secret: String(process.env.TIKTOK_BUSINESS_APP_SECRET),
-      },
-    }).catch(() => undefined);
-
-    return String((data?.list || [])[0]?.advertiser_id || '');
+    return String((await this.advertisers(accessToken))[0]?.advertiser_id || '');
   }
 
   private async advertiserName(
     accessToken: string,
     advertiserId: string
   ): Promise<string> {
+    const found = (await this.advertisers(accessToken)).find(
+      (advertiser: any) => String(advertiser.advertiser_id) === advertiserId
+    );
+
+    return found?.advertiser_name || `TikTok Ads ${advertiserId}`;
+  }
+
+  private async advertisers(accessToken: string): Promise<any[]> {
     const data = await this.call<any>('/oauth2/advertiser/get/', accessToken, {
       query: {
         app_id: String(process.env.TIKTOK_BUSINESS_APP_ID),
@@ -273,11 +292,7 @@ export class TiktokBusinessAdsProvider
       },
     }).catch(() => undefined);
 
-    const found = (data?.list || []).find(
-      (advertiser: any) => String(advertiser.advertiser_id) === advertiserId
-    );
-
-    return found?.advertiser_name || `TikTok Ads ${advertiserId}`;
+    return data?.list || [];
   }
 
   // ---------------------------------------------------------------------------

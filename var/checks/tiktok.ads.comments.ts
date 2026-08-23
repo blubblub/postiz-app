@@ -1,13 +1,16 @@
 /**
  * Self-check for the TikTok Ads (advertiser surface) comment provider.
  *
- * The request and response shapes are pinned to the live advertiser API so a
- * future TikTok change fails here instead of silently emptying the comment screen.
+ * OAuth account import plus request and response shapes are pinned to the live
+ * advertiser API so a future TikTok change fails here instead of silently
+ * emptying the comment screen.
  *
  *   npx tsx --tsconfig tsconfig.base.json var/checks/tiktok.ads.comments.ts
  */
 import assert from 'node:assert';
 import { TiktokBusinessAdsProvider } from '@gitroom/nestjs-libraries/integrations/social/tiktok.business.ads.provider';
+import { NoAuthIntegrationsController } from '../../apps/backend/src/api/routes/no.auth.integrations.controller';
+import { ioRedis } from '@gitroom/nestjs-libraries/redis/redis.service';
 
 type Call = { url: string; method: string; body?: any };
 
@@ -57,6 +60,148 @@ const q = (url: string, name: string) =>
   new URL(url).searchParams.get(name) || '';
 
 (async () => {
+  // ---- one advertiser authorization imports every unique account
+  {
+    const originalFetch = globalThis.fetch;
+    const { p, calls, routes } = provider();
+    routes['/oauth2/advertiser/get/'] = ok({
+      list: [
+        { advertiser_id: 'adv1', advertiser_name: 'Account one' },
+        { advertiser_id: 'adv2', advertiser_name: 'Account two' },
+        { advertiser_id: 'adv3', advertiser_name: 'Account three' },
+      ],
+    });
+    globalThis.fetch = (async () => ({
+      json: async () => ({
+        code: 0,
+        message: 'OK',
+        data: {
+          access_token: 'shared-token',
+          advertiser_ids: ['adv1', 'adv2', 'adv1'],
+        },
+      }),
+    })) as any;
+
+    try {
+      const accounts = await p.authenticate({ code: 'code', codeVerifier: '' });
+      assert.deepStrictEqual(
+        accounts.map(({ id, name }: any) => ({ id, name })),
+        [
+          { id: 'adv1', name: 'Account one' },
+          { id: 'adv2', name: 'Account two' },
+          { id: 'adv3', name: 'Account three' },
+        ],
+        'all unique advertisers are returned with their names'
+      );
+      assert.ok(
+        accounts.every(
+          ({ accessToken, refreshToken }: any) =>
+            accessToken === 'shared-token' && refreshToken === 'shared-token'
+        ),
+        'every advertiser shares the authorized long-lived token'
+      );
+      assert.strictEqual(calls.length, 1, 'advertiser names use one API call');
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  }
+
+  // ---- the OAuth callback upserts every account and remains idempotent
+  {
+    const originalGet = ioRedis.get;
+    const originalDel = ioRedis.del;
+    const integrations = new Map<string, any>();
+    let refreshTarget: string | undefined;
+    let token = 'token-1';
+    const accounts = () =>
+      ['adv1', 'adv2'].map((id) => ({
+        id,
+        name: `Name ${id}`,
+        accessToken: token,
+        refreshToken: token,
+        expiresIn: 3600,
+        picture: '',
+        username: id,
+      }));
+
+    (ioRedis as any).get = async (key: string) => {
+      if (key.startsWith('login:')) return 'verifier';
+      if (key.startsWith('organization:')) return 'org1';
+      if (key.startsWith('refresh:')) return refreshTarget;
+      return undefined;
+    };
+    (ioRedis as any).del = async () => 1;
+
+    const integrationService = {
+      checkPreviousConnections: async () => false,
+      createOrUpdateIntegration: async (...args: any[]) => {
+        const internalId = String(args[6]);
+        const integration = {
+          id: `row-${internalId}`,
+          organizationId: args[2],
+          name: args[3],
+          internalId,
+          providerIdentifier: args[7],
+          token: args[8],
+          refreshToken: args[9],
+          customInstanceDetails: args[15],
+          inBetweenSteps: false,
+        };
+        integrations.set(internalId, integration);
+        return integration;
+      },
+    };
+    const controller = new NoAuthIntegrationsController(
+      {
+        getAllowedSocialsIntegrations: () => ['tiktok-business-ads'],
+        getSocialIntegration: () => ({
+          authenticate: async () => accounts(),
+          customFields: undefined,
+          externalUrl: undefined,
+          oneTimeToken: false,
+          isBetweenSteps: false,
+          isChromeExtension: false,
+        }),
+      } as any,
+      integrationService as any,
+      { startRefreshWorkflow: async () => false } as any,
+      {
+        getOrgById: async () => ({
+          id: 'org1',
+          apiKey: 'api-key',
+          isTrailing: false,
+        }),
+      } as any
+    );
+
+    try {
+      const first = await controller.connectSocialMedia(
+        'tiktok-business-ads',
+        { state: 'new', code: 'code', timezone: '0' }
+      );
+      assert.strictEqual(first.internalId, 'adv1');
+      assert.strictEqual(integrations.size, 2, 'both advertisers are imported');
+
+      token = 'token-2';
+      refreshTarget = 'adv2';
+      const refreshed = await controller.connectSocialMedia(
+        'tiktok-business-ads',
+        { state: 'refresh', code: 'code', timezone: '0', refresh: 'adv2' }
+      );
+      assert.strictEqual(refreshed.internalId, 'adv2',
+        'reconnect returns the requested advertiser');
+      assert.strictEqual(integrations.size, 2, 'reconnect creates no duplicates');
+      assert.ok(
+        [...integrations.values()].every(({ token }) => token === 'token-2'),
+        'reconnect updates the shared token on every advertiser'
+      );
+      assert.ok(!('token' in refreshed), 'credentials never leave the callback');
+    } finally {
+      (ioRedis as any).get = originalGet;
+      (ioRedis as any).del = originalDel;
+    }
+  }
+
   // ---- posts are derived by grouping comments on the item they were left on
   {
     const { p, calls, routes } = provider();

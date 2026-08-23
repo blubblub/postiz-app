@@ -93,18 +93,10 @@ export class NoAuthIntegrationsController {
       await ioRedis.del(`onboarding:${body.state}`);
     }
 
-    const {
-      error,
-      accessToken,
-      expiresIn,
-      refreshToken,
-      id,
-      name,
-      picture,
-      username,
-      additionalSettings,
-      // eslint-disable-next-line no-async-promise-executor
-    } = await new Promise<AuthTokenDetails>(async (res) => {
+    // eslint-disable-next-line no-async-promise-executor
+    const authResult = await new Promise<
+      AuthTokenDetails | AuthTokenDetails[]
+    >(async (res) => {
       try {
         const auth = await integrationProvider.authenticate(
           {
@@ -130,10 +122,17 @@ export class NoAuthIntegrationsController {
         if (refresh && integrationProvider.reConnect) {
           console.log('reconnect');
           try {
+            const account =
+              (Array.isArray(auth) ? auth : [auth]).find(
+                ({ id }) => String(id) === String(refresh)
+              ) || (Array.isArray(auth) ? auth[0] : auth);
+            if (!account) {
+              throw new Error('Invalid API key');
+            }
             const newAuth = await integrationProvider.reConnect(
-              auth.id,
+              account.id,
               refresh,
-              auth.accessToken
+              account.accessToken
             );
             return res({ ...newAuth, refreshToken: body.refresh });
           } catch (err: any) {
@@ -175,75 +174,88 @@ export class NoAuthIntegrationsController {
       }
     });
 
+    const authResults = Array.isArray(authResult) ? authResult : [authResult];
+    const error = authResults.find((auth) => auth.error)?.error;
     if (error) {
       throw new NotEnoughScopes(error);
     }
 
-    if (!id) {
+    if (!authResults.length || authResults.some((auth) => !auth.id)) {
       throw new NotEnoughScopes('Invalid API key');
     }
 
-    if (refresh && String(id) !== String(refresh)) {
+    const primaryAuth = refresh
+      ? authResults.find(({ id }) => String(id) === String(refresh))
+      : authResults[0];
+    if (!primaryAuth) {
       throw new NotEnoughScopes(
         'Please refresh the channel that needs to be refreshed'
       );
     }
 
-    let validName = name;
-    if (!validName) {
-      if (username) {
-        validName = username.split('.')[0] ?? username;
-      } else {
-        validName = `Channel_${String(id).slice(0, 8)}`;
+    for (const { id } of authResults) {
+      if (
+        process.env.STRIPE_PUBLISHABLE_KEY &&
+        org.isTrailing &&
+        (await this._integrationService.checkPreviousConnections(
+          org.id,
+          String(id)
+        ))
+      ) {
+        throw new HttpException('', 412);
       }
     }
 
-    if (
-      process.env.STRIPE_PUBLISHABLE_KEY &&
-      org.isTrailing &&
-      (await this._integrationService.checkPreviousConnections(
-        org.id,
-        String(id)
-      ))
-    ) {
-      throw new HttpException('', 412);
-    }
-
-    const createUpdate =
-      await this._integrationService.createOrUpdateIntegration(
-        additionalSettings,
+    const customInstanceDetails = details
+      ? AuthService.fixedEncryption(details)
+      : integrationProvider.customFields
+      ? AuthService.fixedEncryption(Buffer.from(body.code, 'base64').toString())
+      : integrationProvider.isChromeExtension
+      ? AuthService.fixedEncryption(Buffer.from(body.code, 'base64').toString())
+      : undefined;
+    const createIntegration = async (auth: AuthTokenDetails) => {
+      const validName =
+        auth.name ||
+        (auth.username
+          ? auth.username.split('.')[0] ?? auth.username
+          : `Channel_${String(auth.id).slice(0, 8)}`);
+      const created = await this._integrationService.createOrUpdateIntegration(
+        auth.additionalSettings,
         !!integrationProvider.oneTimeToken,
         org.id,
         validName.trim(),
-        picture,
+        auth.picture,
         'social',
-        String(id),
+        String(auth.id),
         integration,
-        accessToken,
-        refreshToken,
-        expiresIn,
-        username,
+        auth.accessToken,
+        auth.refreshToken,
+        auth.expiresIn,
+        auth.username,
         refresh ? false : integrationProvider.isBetweenSteps,
         body.refresh,
         +body.timezone,
-        details
-          ? AuthService.fixedEncryption(details)
-          : integrationProvider.customFields
-          ? AuthService.fixedEncryption(
-              Buffer.from(body.code, 'base64').toString()
-            )
-          : integrationProvider.isChromeExtension
-          ? AuthService.fixedEncryption(
-              Buffer.from(body.code, 'base64').toString()
-            )
-          : undefined
+        customInstanceDetails
       );
 
-    this._refreshIntegrationService
-      .startRefreshWorkflow(org.id, createUpdate.id, integrationProvider)
-      .catch((err) => {
-        console.log(err);
-      });
+      this._refreshIntegrationService
+        .startRefreshWorkflow(org.id, created.id, integrationProvider)
+        .catch((err) => {
+          console.log(err);
+        });
+      return created;
+    };
+
+    const createUpdate = await createIntegration(primaryAuth);
+    // ponytail: a fresh OAuth retry completes a partial bulk import through
+    // idempotent upserts; add a transaction only if all-or-nothing is needed.
+    for (const auth of authResults) {
+      if (auth !== primaryAuth) {
+        await createIntegration(auth);
+      }
+    }
+
+    const { accessToken, id } = primaryAuth;
 
     // Fetch pages if this is a two-step provider and not a refresh
     let pages: any[] = [];
@@ -369,6 +381,12 @@ export class NoAuthIntegrationsController {
 
     if (typeof authResult === 'string') {
       throw new HttpException(authResult, 400);
+    }
+    if (Array.isArray(authResult)) {
+      throw new HttpException(
+        'Chrome extension integrations cannot return multiple accounts',
+        400
+      );
     }
 
     if (String(authResult.id) !== String(integration.internalId)) {
