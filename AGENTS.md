@@ -192,6 +192,14 @@ lookup. Both are opaque to the service, controllers, MCP tools and UI.
 TikTok's own docs — `dayjs.unix()` (correct on the organic surface) produces an
 Invalid Date; parse with `dayjs.utc()` and an epoch fallback.
 
+**One authorization imports every advertiser.** `authenticate()` returns an
+array (`IAuthenticator.authenticate` is widened to
+`AuthTokenDetails | AuthTokenDetails[]`): the provider unions the token
+response's `advertiser_ids` with `/oauth2/advertiser/get/` (names resolved in
+one call), and the OAuth callback upserts each row idempotently with the shared
+long-lived token. Reconnecting any one of them rotates the token on all rows.
+Verified live 2026-08-23: 25 advertisers imported, one token, no duplicates.
+
 ### Setup — none of this can be done from code
 
 1. **Same app**, no new registration: the existing `TIKTOK_BUSINESS_APP_ID` /
