@@ -21,6 +21,9 @@ import { ConfigurationChecker } from '@gitroom/helpers/configuration/configurati
 import { startMcp } from '@gitroom/nestjs-libraries/chat/start.mcp';
 
 async function start() {
+  // Boot markers: a pre-listen hang logs nothing and pm2 still says "online";
+  // these name the phase of the next hang in backend-out.log.
+  console.log('[boot] creating Nest application');
   const app = await NestFactory.create(AppModule, {
     rawBody: true,
     cors: {
@@ -48,7 +51,9 @@ async function start() {
     },
   });
 
+  console.log('[boot] Nest application created, starting MCP');
   await startMcp(app);
+  console.log('[boot] MCP started');
 
   app.useGlobalPipes(
     new ValidationPipe({
@@ -70,6 +75,7 @@ async function start() {
 
   const port = process.env.PORT || 3000;
 
+  console.log('[boot] listening on port ' + port);
   try {
     await app.listen(port);
     console.log('Backend started successfully on port ' + port);

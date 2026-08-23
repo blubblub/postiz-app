@@ -3,6 +3,14 @@ services:
     image: ghcr.io/gitroomhq/postiz-app:latest
     container_name: postiz
     restart: always
+    # Probe the backend port, not nginx: a hung backend boot leaves nginx
+    # (5000) serving 502s while the container reports healthy.
+    healthcheck:
+      test: node -e "const r=require('http').get('http://localhost:3000/',res=>process.exit(res.statusCode<500?0:1));r.on('error',()=>process.exit(1));r.setTimeout(4000,()=>{r.destroy();process.exit(1)})"
+      interval: 30s
+      timeout: 10s
+      start_period: 120s
+      retries: 5
     environment:
       # === Required Settings
       MAIN_URL: 'http://localhost:4007'
