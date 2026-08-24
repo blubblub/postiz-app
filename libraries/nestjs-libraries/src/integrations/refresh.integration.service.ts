@@ -73,8 +73,13 @@ export class RefreshIntegrationService {
     socialProvider: SocialProvider,
     cause = ''
   ): Promise<AuthTokenDetails | false> {
+    // Prefer the stored refresh token; fall back to the composite channel
+    // token so providers (Instagram/Facebook) whose user token lives in the
+    // `page___user` composite can still renew when `refreshToken` was never
+    // persisted on the row.
+    const credential = integration.refreshToken || integration.token;
     const refresh: false | AuthTokenDetails = await socialProvider
-      .refreshToken(integration.refreshToken)
+      .refreshToken(credential)
       .catch((err) => false);
 
     if (!refresh || !refresh.accessToken) {

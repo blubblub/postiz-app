@@ -250,12 +250,32 @@ export class FacebookProvider extends SocialAbstract implements SocialProvider {
   }
 
   async refreshToken(refresh_token: string): Promise<AuthTokenDetails> {
+    // Same renewal as InstagramProvider.refreshToken; handle a bare user token
+    // or a `page___user` composite (user token is the part after `___`).
+    const userToken = refresh_token.includes('___')
+      ? refresh_token.split('___')[1]
+      : refresh_token;
+
+    const { access_token } = await (
+      await fetch(
+        'https://graph.facebook.com/v20.0/oauth/access_token' +
+          '?grant_type=fb_exchange_token' +
+          `&client_id=${process.env.FACEBOOK_APP_ID}` +
+          `&client_secret=${process.env.FACEBOOK_APP_SECRET}` +
+          `&fb_exchange_token=${userToken}`
+      )
+    ).json();
+
+    if (!access_token) {
+      throw new Error('Could not refresh the Facebook token');
+    }
+
     return {
-      refreshToken: '',
-      expiresIn: 0,
-      accessToken: '',
       id: '',
       name: '',
+      accessToken: access_token,
+      refreshToken: access_token,
+      expiresIn: dayjs().add(59, 'days').unix() - dayjs().unix(),
       picture: '',
       username: '',
     };

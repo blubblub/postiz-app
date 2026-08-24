@@ -220,41 +220,26 @@ export class IntegrationService {
   }
 
   async refreshTokens() {
-    const integrations = await this._integrationRepository.needsToBeRefreshed();
-    for (const integration of integrations) {
-      const provider = this._integrationManager.getSocialIntegration(
-        integration.providerIdentifier
-      );
+    const expiring = await this._integrationRepository.needsToBeRefreshed();
+    // Meta rows can carry a bogus far-future expiry, so also sweep them by age.
+    const meta = await this._integrationRepository.needsProactiveRefresh(
+      ['instagram', 'facebook'],
+      30
+    );
 
-      const data = await this.refreshToken(provider, integration.refreshToken!);
-
-      if (!data) {
-        await this.informAboutRefreshError(
-          integration.organizationId,
-          integration
-        );
-        await this._integrationRepository.refreshNeeded(
-          integration.organizationId,
-          integration.id
-        );
-        return;
+    const seen = new Set<string>();
+    const integrations = [...expiring, ...meta].filter((i) => {
+      if (seen.has(i.id)) {
+        return false;
       }
+      seen.add(i.id);
+      return true;
+    });
 
-      const { refreshToken, accessToken, expiresIn } = data;
-
-      await this.createOrUpdateIntegration(
-        undefined,
-        !!provider.oneTimeToken,
-        integration.organizationId,
-        integration.name,
-        undefined,
-        'social',
-        integration.internalId,
-        integration.providerIdentifier,
-        accessToken,
-        refreshToken,
-        expiresIn
-      );
+    for (const integration of integrations) {
+      // Go through the full refresh so reConnect() rebuilds the page token and
+      // the stored `page___user` composite, not just the user token.
+      await this._refreshIntegrationService.refresh(integration, 'cron');
     }
   }
 

@@ -409,6 +409,25 @@ export class IntegrationRepository {
     });
   }
 
+  // Meta (Facebook/Instagram) rows are sometimes stored with the multi-decade
+  // default expiry (e.g. 2058) instead of the real ~60-day long-lived-token
+  // lifetime, so `needsToBeRefreshed` never schedules them. Refresh them by
+  // token age instead: once the token is older than ~30 days, renew it before
+  // Meta actually expires it at ~60 days.
+  needsProactiveRefresh(providers: string[], olderThanDays: number) {
+    return this._integration.model.integration.findMany({
+      where: {
+        providerIdentifier: { in: providers },
+        updatedAt: {
+          lte: dayjs().subtract(olderThanDays, 'day').toDate(),
+        },
+        inBetweenSteps: false,
+        deletedAt: null,
+        refreshNeeded: false,
+      },
+    });
+  }
+
   async setBetweenRefreshSteps(id: string) {
     return this._integration.model.integration.update({
       where: {

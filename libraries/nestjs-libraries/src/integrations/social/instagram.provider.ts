@@ -101,12 +101,34 @@ export class InstagramProvider
   }
 
   async refreshToken(refresh_token: string): Promise<AuthTokenDetails> {
+    // The credential may be a bare user token or the `page___user` composite;
+    // Meta renewal (fb_exchange_token) needs the user token, which is the part
+    // after `___` when present. refreshProcess then calls reConnect() to
+    // rebuild the page token and the stored composite.
+    const userToken = refresh_token.includes('___')
+      ? refresh_token.split('___')[1]
+      : refresh_token;
+
+    const { access_token } = await (
+      await fetch(
+        'https://graph.facebook.com/v20.0/oauth/access_token' +
+          '?grant_type=fb_exchange_token' +
+          `&client_id=${process.env.FACEBOOK_APP_ID}` +
+          `&client_secret=${process.env.FACEBOOK_APP_SECRET}` +
+          `&fb_exchange_token=${userToken}`
+      )
+    ).json();
+
+    if (!access_token) {
+      throw new Error('Could not refresh the Instagram token');
+    }
+
     return {
-      refreshToken: '',
-      expiresIn: 0,
-      accessToken: '',
       id: '',
       name: '',
+      accessToken: access_token,
+      refreshToken: access_token,
+      expiresIn: dayjs().add(59, 'days').unix() - dayjs().unix(),
       picture: '',
       username: '',
     };
