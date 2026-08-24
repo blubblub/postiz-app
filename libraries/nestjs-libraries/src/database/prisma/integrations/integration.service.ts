@@ -9,6 +9,7 @@ import { IntegrationRepository } from '@gitroom/nestjs-libraries/database/prisma
 import { IntegrationManager } from '@gitroom/nestjs-libraries/integrations/integration.manager';
 import {
   AnalyticsData,
+  SocialComment,
   SocialCommentPostsPage,
   SocialCommentsPage,
   SocialProvider,
@@ -768,19 +769,87 @@ export class IntegrationService {
     }
 
     try {
-      return await integrationProvider.fetchComments(
+      const page = await integrationProvider.fetchComments(
         getIntegration.internalId,
         getIntegration.token,
         postId,
         getIntegration,
         cursor
       );
+
+      // Re-attach comments the platform dropped because they are hidden (e.g.
+      // Instagram removes them from /comments), so the UI always lists them —
+      // marked hidden — and unhide can find the id again.
+      return await this.mergeHiddenComments(getIntegration.id, postId, page);
     } catch (e) {
       if (e instanceof RefreshToken && !forceRefresh) {
         return this.fetchPostComments(orgId, integration, postId, cursor, true);
       }
       throw e;
     }
+  }
+
+  private async mergeHiddenComments(
+    integrationId: string,
+    postId: string,
+    page: SocialCommentsPage
+  ): Promise<SocialCommentsPage> {
+    let stored: Awaited<
+      ReturnType<IntegrationRepository['getHiddenComments']>
+    > = [];
+    try {
+      stored = await this._integrationRepository.getHiddenComments(
+        integrationId,
+        postId
+      );
+    } catch {
+      return page; // persistence is a safety net, never break listing
+    }
+    if (!stored.length) {
+      return page;
+    }
+
+    const present = new Set<string>();
+    const collect = (list: SocialComment[]) => {
+      for (const c of list) {
+        present.add(String(c.id));
+        collect(c.replies || []);
+      }
+    };
+    collect(page.comments);
+
+    const missing = stored.filter((s) => !present.has(s.commentId));
+    if (!missing.length) {
+      return page;
+    }
+
+    const toComment = (s: (typeof stored)[number]): SocialComment => ({
+      id: s.commentId,
+      text: s.text || '',
+      username: s.username,
+      timestamp: s.timestamp,
+      likeCount: s.likeCount,
+      hidden: true,
+      replies: [],
+    });
+
+    const topLevel = missing.filter((s) => !s.parentId);
+    const replies = missing.filter((s) => s.parentId);
+    const comments = [...page.comments];
+
+    // Replies whose parent is present get nested back under it; anything we
+    // cannot place (parent also hidden and untracked) stays top-level so it is
+    // never lost.
+    for (const reply of replies) {
+      const parent = comments.find((c) => String(c.id) === reply.parentId);
+      if (parent) {
+        parent.replies = [...(parent.replies || []), toComment(reply)];
+      } else {
+        topLevel.push(reply);
+      }
+    }
+
+    return { ...page, comments: [...comments, ...topLevel.map(toComment)] };
   }
 
   async replyToComment(
@@ -968,7 +1037,20 @@ export class IntegrationService {
     }
 
     try {
-      return await integrationProvider.hideComment(
+      // Snapshot the comment before hiding so it stays listed once the platform
+      // drops it (Instagram removes hidden comments from /comments). On unhide,
+      // drop the snapshot — the platform returns it again.
+      let snapshot: (SocialComment & { parentId?: string }) | undefined;
+      if (hidden && integrationProvider.fetchComments) {
+        snapshot = await this.findCommentSnapshot(
+          getIntegration,
+          integrationProvider,
+          postId,
+          cleanCommentId
+        );
+      }
+
+      const result = await integrationProvider.hideComment(
         getIntegration.internalId,
         postId,
         cleanCommentId,
@@ -976,6 +1058,26 @@ export class IntegrationService {
         hidden,
         getIntegration
       );
+
+      if (hidden) {
+        await this._integrationRepository
+          .saveHiddenComment(getIntegration.id, {
+            commentId: cleanCommentId,
+            postId,
+            parentId: snapshot?.parentId,
+            text: snapshot?.text,
+            username: snapshot?.username,
+            timestamp: snapshot?.timestamp,
+            likeCount: snapshot?.likeCount,
+          })
+          .catch(() => null);
+      } else {
+        await this._integrationRepository
+          .removeHiddenComment(getIntegration.id, cleanCommentId)
+          .catch(() => null);
+      }
+
+      return result;
     } catch (e) {
       if (e instanceof RefreshToken && !forceRefresh) {
         return this.hideComment(
@@ -989,6 +1091,57 @@ export class IntegrationService {
       }
       throw e;
     }
+  }
+
+  // Best-effort lookup of a comment (and its parent, for replies) so the stored
+  // snapshot keeps text/author. Returns undefined if the comment is not found.
+  private async findCommentSnapshot(
+    integration: Integration,
+    provider: SocialProvider,
+    postId: string,
+    commentId: string
+  ): Promise<(SocialComment & { parentId?: string }) | undefined> {
+    try {
+      let cursor: string | undefined;
+      // Cap the scan so a deep comment can't page forever.
+      for (let i = 0; i < 10; i++) {
+        const page: SocialCommentsPage = await provider.fetchComments!(
+          integration.internalId,
+          integration.token,
+          postId,
+          integration,
+          cursor
+        );
+        const found = this.findInComments(page.comments, commentId);
+        if (found) {
+          return found;
+        }
+        if (!page.next) {
+          break;
+        }
+        cursor = page.next;
+      }
+    } catch {
+      // Snapshot is best-effort; hiding must still proceed without it.
+    }
+    return undefined;
+  }
+
+  private findInComments(
+    comments: SocialComment[],
+    id: string,
+    parentId?: string
+  ): (SocialComment & { parentId?: string }) | undefined {
+    for (const c of comments) {
+      if (String(c.id) === id) {
+        return { ...c, parentId };
+      }
+      const inReplies = this.findInComments(c.replies || [], id, String(c.id));
+      if (inReplies) {
+        return inReplies;
+      }
+    }
+    return undefined;
   }
 
   customers(orgId: string) {

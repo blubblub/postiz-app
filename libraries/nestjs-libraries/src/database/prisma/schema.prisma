@@ -340,6 +340,7 @@ model Integration {
   commentPostsDone      Boolean                @default(false)
   commentPostsSyncedAt  DateTime?
   commentPosts          CommentPost[]
+  hiddenComments        HiddenComment[]
   exisingPlugData       ExisingPlugData[]
   customer              Customer?              @relation(fields: [customerId], references: [id])
   organization          Organization           @relation(fields: [organizationId], references: [id])
@@ -381,6 +382,28 @@ model CommentPost {
   @@unique([integrationId, postId])
   @@index([integrationId, publishDate])
   @@index([integrationId])
+}
+
+// Comments hidden on a platform that drops them from its listing API
+// (Instagram removes hidden comments from /comments, so they could never be
+// unhidden from the UI). We keep a snapshot here so the comment stays listed —
+// marked hidden — and unhide can always find the id again.
+model HiddenComment {
+  id            String      @id @default(uuid())
+  integrationId String
+  postId        String
+  commentId     String
+  parentId      String?
+  text          String      @default("")
+  username      String?
+  timestamp     String?
+  likeCount     Int         @default(0)
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
+  integration   Integration @relation(fields: [integrationId], references: [id])
+
+  @@unique([integrationId, commentId])
+  @@index([integrationId, postId])
 }
 
 model Signatures {

@@ -17,7 +17,8 @@ export class IntegrationRepository {
     private _exisingPlugData: PrismaRepository<'exisingPlugData'>,
     private _customers: PrismaRepository<'customer'>,
     private _mentions: PrismaRepository<'mentions'>,
-    private _commentPosts: PrismaRepository<'commentPost'>
+    private _commentPosts: PrismaRepository<'commentPost'>,
+    private _hiddenComments: PrismaRepository<'hiddenComment'>
   ) {}
 
   // --- comment-post cache -------------------------------------------------
@@ -85,6 +86,51 @@ export class IntegrationRepository {
         ...(state.done !== undefined ? { commentPostsDone: state.done } : {}),
         ...(state.syncedAt ? { commentPostsSyncedAt: state.syncedAt } : {}),
       },
+    });
+  }
+
+  // --- hidden-comment persistence ------------------------------------------
+  // Instagram (and any provider whose listing API omits hidden comments) keeps
+  // a snapshot of each hidden comment so the UI can still list and unhide it.
+
+  saveHiddenComment(
+    integrationId: string,
+    comment: {
+      commentId: string;
+      postId: string;
+      parentId?: string;
+      text?: string;
+      username?: string;
+      timestamp?: string;
+      likeCount?: number;
+    }
+  ) {
+    const value = {
+      postId: comment.postId,
+      parentId: comment.parentId,
+      text: comment.text ?? '',
+      username: comment.username,
+      timestamp: comment.timestamp,
+      likeCount: comment.likeCount ?? 0,
+    };
+    return this._hiddenComments.model.hiddenComment.upsert({
+      where: { integrationId_commentId: { integrationId, commentId: comment.commentId } },
+      create: { integrationId, commentId: comment.commentId, ...value },
+      update: value,
+    });
+  }
+
+  removeHiddenComment(integrationId: string, commentId: string) {
+    return this._hiddenComments.model.hiddenComment
+      .delete({
+        where: { integrationId_commentId: { integrationId, commentId } },
+      })
+      .catch(() => null); // already gone
+  }
+
+  getHiddenComments(integrationId: string, postId: string) {
+    return this._hiddenComments.model.hiddenComment.findMany({
+      where: { integrationId, postId },
     });
   }
 
