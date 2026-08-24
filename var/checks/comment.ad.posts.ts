@@ -159,6 +159,8 @@ const stub = (routes: Record<string, any>) =>
   assert.deepStrictEqual(r.posts.map((p: any) => p.id), ['ig_ad_1', 'm1']);
   assert.strictEqual(r.posts[0].isAd, true);
   assert.strictEqual(r.posts[0].commentCount, 7, 'counts come from the media node');
+  assert.strictEqual(r.posts[0].releaseURL, 'https://ig/1',
+    'creative permalink survives a readable media node without its own permalink');
   assert.strictEqual(r.posts[1].isAd, undefined);
 
   calls.length = 0;

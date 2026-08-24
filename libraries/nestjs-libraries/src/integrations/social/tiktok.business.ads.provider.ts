@@ -406,6 +406,7 @@ export class TiktokBusinessAdsProvider
           posts.set(postId, {
             id: postId,
             releaseId: postId,
+            releaseURL: row.video_play_url,
             content: row.ad_text || row.adgroup_name || 'TikTok ad',
             // Never emit an unparseable date: the comment screen formats it and
             // the shared cache would write it into a NOT NULL column.
@@ -419,6 +420,7 @@ export class TiktokBusinessAdsProvider
         }
 
         existing.commentCount = (existing.commentCount || 0) + 1;
+        existing.releaseURL = existing.releaseURL || row.video_play_url;
         // Show the most recent activity on the post rather than whichever
         // comment happened to come back first.
         if (createdAt && createdAt.toISOString() > existing.publishDate) {

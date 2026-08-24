@@ -1072,7 +1072,15 @@ export class InstagramProvider
     return ids.map((mediaId) => {
       const found = media?.[mediaId];
       if (found?.id) {
-        return InstagramProvider.toCommentPost(found, true);
+        return InstagramProvider.toCommentPost(
+          {
+            ...found,
+            permalink:
+              found.permalink ||
+              byMediaId.get(mediaId)?.creative?.instagram_permalink_url,
+          },
+          true
+        );
       }
 
       const ad = byMediaId.get(mediaId);

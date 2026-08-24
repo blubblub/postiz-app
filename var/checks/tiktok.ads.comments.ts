@@ -214,9 +214,11 @@ const q = (url: string, name: string) =>
     });
     routes['/comment/list/'] = ok({
       comments: [
-        row({ comment_id: 'c1', tiktok_item_id: 'item1' }),
-        row({ comment_id: 'c2', tiktok_item_id: 'item1', create_time: '2026-03-01' }),
-        row({ comment_id: 'c3', tiktok_item_id: 'item2' }),
+        row({ comment_id: 'c1', tiktok_item_id: 'item1', video_play_url: '' }),
+        row({ comment_id: 'c2', tiktok_item_id: 'item1', create_time: '2026-03-01',
+          video_play_url: 'https://video/1.mp4' }),
+        row({ comment_id: 'c3', tiktok_item_id: 'item2',
+          video_play_url: 'https://video/2.mp4' }),
       ],
       page_info: { page: 1, total_page: 1 },
     });
@@ -232,6 +234,9 @@ const q = (url: string, name: string) =>
     assert.strictEqual(page.posts[0].isAd, true, 'every post here is an ad');
     assert.strictEqual(page.posts[0].thumbnail, 'https://cover/1.jpg');
     assert.strictEqual(page.posts[0].content, 'Buy the thing');
+    assert.deepStrictEqual(page.posts.map((post: any) => post.releaseURL),
+      ['https://video/1.mp4', 'https://video/2.mp4'],
+      'every ad links to its playable video');
     assert.strictEqual(page.next, '2', 'ad-group pages drive the cursor');
 
     const listed = calls.filter((c) => c.url.includes('/comment/list/'));
