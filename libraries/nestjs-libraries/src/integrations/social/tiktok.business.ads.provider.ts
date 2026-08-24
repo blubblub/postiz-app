@@ -406,7 +406,11 @@ export class TiktokBusinessAdsProvider
           posts.set(postId, {
             id: postId,
             releaseId: postId,
-            releaseURL: row.video_play_url,
+            // TikTok resolves post pages by their global item id; the username
+            // segment can be a placeholder, so this needs no identity lookup.
+            releaseURL: `https://www.tiktok.com/@_/video/${encodeURIComponent(
+              itemId
+            )}`,
             content: row.ad_text || row.adgroup_name || 'TikTok ad',
             // Never emit an unparseable date: the comment screen formats it and
             // the shared cache would write it into a NOT NULL column.
@@ -420,7 +424,6 @@ export class TiktokBusinessAdsProvider
         }
 
         existing.commentCount = (existing.commentCount || 0) + 1;
-        existing.releaseURL = existing.releaseURL || row.video_play_url;
         // Show the most recent activity on the post rather than whichever
         // comment happened to come back first.
         if (createdAt && createdAt.toISOString() > existing.publishDate) {
