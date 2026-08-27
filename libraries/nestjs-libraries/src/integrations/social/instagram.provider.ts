@@ -25,10 +25,10 @@ import { chunk } from 'lodash';
 import {
   adsByCreativeId,
   fetchMetaAds,
+  mapLimit,
+  MetaAdsResult,
 } from '@gitroom/nestjs-libraries/integrations/social/meta.ads';
-
-// Ceiling on the optional ad-media walk so it can never dominate a screen load.
-const ADS_LOOKUP_TIMEOUT_MS = 8000;
+import { MetaAdsCache } from '@gitroom/nestjs-libraries/integrations/social/meta.ads.cache';
 
 @Rules(
   "Instagram should have at least one attachment, if it's a story, it can have only one picture"
@@ -1020,6 +1020,30 @@ export class InstagramProvider
   private static readonly MEDIA_FIELDS =
     'id,caption,media_type,media_url,thumbnail_url,permalink,timestamp,comments_count,like_count';
 
+  /**
+   * Two clocks, because the two halves of an ad listing change at very
+   * different rates and cost very different amounts.
+   *
+   * The Marketing API walk answers "which ads exist" — 49 ad accounts, ~110
+   * requests, ~60s — and new ads appear a few times a day. Running it often is
+   * what exhausts the per-ad-account quota (a 15 minute TTL was enough to make
+   * the Business Manager edge start failing, so one run saw 35 accounts where
+   * the previous saw 49). An hour.
+   *
+   * The batched media read answers "how many comments" — ~60 requests, ~17s —
+   * and that is the number a moderator is actually watching. Fifteen minutes,
+   * so a comment shows up on the screen within that, rather than being invisible
+   * for an hour.
+   *
+   * Static, so they survive however the provider is instantiated per request.
+   */
+  private static readonly adMediaCache = new MetaAdsCache<SocialCommentPost[]>(
+    15 * 60 * 1000
+  );
+  private static readonly adWalkCache = new MetaAdsCache<MetaAdsResult>(
+    60 * 60 * 1000
+  );
+
   private static toCommentPost(post: any, isAd = false): SocialCommentPost {
     return {
       id: String(post.id),
@@ -1044,15 +1068,38 @@ export class InstagramProvider
     igUserId: string,
     userToken: string
   ): Promise<SocialCommentPost[]> {
-    const ads = await fetchMetaAds(
-      userToken,
-      [
-        'effective_instagram_media_id',
-        'instagram_permalink_url',
-        'instagram_user_id',
-      ],
-      (url) => this.fetch(url, {}, 'fetch ads')
+    // Cached on the slower clock — see adWalkCache. Blocking, because this is
+    // already inside adMediaCache's background refresh: returning early with no
+    // ads would cache an empty list as if it were an answer.
+    const walk = await InstagramProvider.adWalkCache.readBlocking(
+      `instagram:${igUserId}`,
+      () =>
+        fetchMetaAds(
+          userToken,
+          [
+            'effective_instagram_media_id',
+            'instagram_permalink_url',
+            'instagram_user_id',
+          ],
+          (url) => this.fetch(url, {}, 'fetch ads')
+        )
     );
+
+    if (!walk.value) {
+      throw new Error('instagram ad walk failed');
+    }
+
+    const { ads, accounts, unreadable } = walk.value;
+
+    if (unreadable.length) {
+      // A partial ad list is not an error the moderator can act on, but it must
+      // not pass for a complete one in the logs either — this is exactly how the
+      // five-account cap stayed invisible for so long.
+      console.warn(
+        `[instagram] ad walk incomplete: ${unreadable.length} of ${accounts.length} discovered ad accounts or account edges could not be read`,
+        unreadable.slice(0, 5)
+      );
+    }
 
     const byMediaId = adsByCreativeId(
       ads,
@@ -1074,26 +1121,35 @@ export class InstagramProvider
     // fails the whole request — so chunk it. Ad media is documented for the
     // /comments edge but the media node itself is not promised, so a failed
     // chunk costs those cards their thumbnail and counts, not the posts.
+    // Bounded, not `Promise.all`: a year of ads is ~2,500 media on the live
+    // account, and firing 50 batches at once is how you earn a rate limit.
     const media: Record<string, any> = Object.assign(
       {},
-      ...(await Promise.all(
-        chunk(ids, 50).map((batch) =>
-          this.fetch(
-            `https://graph.facebook.com/v20.0/?ids=${batch.join(
-              ','
-            )}&fields=${InstagramProvider.MEDIA_FIELDS}&access_token=${userToken}`,
-            {},
-            'fetch ad media'
-          )
-            .then((response) => response.json())
-            .catch(() => ({}))
+      ...(await mapLimit(chunk(ids, 50), 8, (batch) =>
+        this.fetch(
+          `https://graph.facebook.com/v20.0/?ids=${batch.join(
+            ','
+          )}&fields=${InstagramProvider.MEDIA_FIELDS}&access_token=${userToken}`,
+          {},
+          'fetch ad media'
         )
+          .then((response) => response.json())
+          .catch(() => ({}))
       ))
     );
 
-    return ids.map((mediaId) => {
+    return ids.flatMap((mediaId) => {
       const found = media?.[mediaId];
       if (found?.id) {
+        // A year of ads is ~3,100 media on the live account and only ~240 of
+        // them have ever been commented on. This is a comment screen: an ad
+        // with no comments is not something anyone can act on, and 2,900 empty
+        // cards bury the ones that are. The count is refreshed on the fast
+        // clock, so a newly commented ad appears here within minutes.
+        if (!Number(found.comments_count || 0)) {
+          return [];
+        }
+
         return InstagramProvider.toCommentPost(
           {
             ...found,
@@ -1105,6 +1161,8 @@ export class InstagramProvider
         );
       }
 
+      // Media Graph would not return a node for. The count is unknown rather
+      // than zero, so the card stays — its comments edge may still work.
       const ad = byMediaId.get(mediaId);
       const createdAt = ad?.created_time ? new Date(ad.created_time) : undefined;
       return {
@@ -1149,7 +1207,7 @@ export class InstagramProvider
     // host and no user token — it has no ad surface at all, so it skips this.
     const wantsAds = !cursor && type === 'graph.facebook.com' && !!userToken;
 
-    const [response, adPosts] = await Promise.all([
+    const [response, ads] = await Promise.all([
       // Not `(await this.fetch(...)).json()` — awaiting inside the array literal
       // runs this to completion before the ads walk below is even started.
       this.fetch(
@@ -1158,25 +1216,19 @@ export class InstagramProvider
         'fetch comment posts'
       ).then((mediaResponse) => mediaResponse.json()),
       wantsAds
-        ? Promise.race([
-            this.fetchAdMedia(id, userToken),
-            // The ads walk is 1 + N requests on the critical path, and
-            // SocialAbstract.fetch retries Meta's "unknown error" three times
-            // at 5s apart. Cap it so an optional extra can never turn the
-            // comment screen into a 30-second load; the posts show up on the
-            // next visit.
-            timer(ADS_LOOKUP_TIMEOUT_MS).then(() => [] as SocialCommentPost[]),
-          ]).catch(() => {
-            // No ads_read, or a user half that expired (a ~60 day token whose
-            // refreshToken() returns empty strings), so show the organic list
-            // rather than failing the screen. RefreshToken is swallowed on
-            // purpose: this branch is optional and the /media request beside it
-            // uses the page half, so it — not this — is the authority on
-            // whether the connection is still alive.
-            return [] as SocialCommentPost[];
-          })
-        : ([] as SocialCommentPost[]),
+        ? // Cached and bounded: the exhaustive walk is far too slow to sit on a
+          // screen load, and a failed one (no ads_read, or a user half that
+          // expired) must degrade to the organic list rather than fail the
+          // screen. RefreshToken is swallowed in there on purpose — this branch
+          // is optional and the /media request beside it uses the page half, so
+          // it, not this, is the authority on whether the channel is alive.
+          InstagramProvider.adMediaCache.read(`instagram:${id}`, () =>
+            this.fetchAdMedia(id, userToken)
+          )
+        : { value: [] as SocialCommentPost[], complete: true },
     ]);
+
+    const adPosts = ads.value || [];
 
     const organic = (response.data || []).map((post: any) =>
       InstagramProvider.toCommentPost(post)
@@ -1209,6 +1261,9 @@ export class InstagramProvider
       limit: safeLimit,
       hasMore: !!next,
       next,
+      // The first walk for a large business outlives the request that started
+      // it. Say so, rather than letting an ad-less list imply there are no ads.
+      ...(ads.complete ? {} : { syncing: true }),
     };
   }
 

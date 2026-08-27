@@ -27,7 +27,10 @@ import { Rules } from '@gitroom/nestjs-libraries/chat/rules.description.decorato
 import {
   adsByCreativeId,
   fetchMetaAds,
+  mapLimit,
+  MetaAdsResult,
 } from '@gitroom/nestjs-libraries/integrations/social/meta.ads';
+import { MetaAdsCache } from '@gitroom/nestjs-libraries/integrations/social/meta.ads.cache';
 import { chunk } from 'lodash';
 
 @Rules(
@@ -908,6 +911,17 @@ export class FacebookProvider extends SocialAbstract implements SocialProvider {
   private static readonly POST_FIELDS =
     'id,message,story,created_time,permalink_url,full_picture,comments.limit(0).summary(true),likes.limit(0).summary(true)';
 
+  // Two clocks: the Marketing API walk answers "which ads exist" and is slow
+  // and quota-hungry, while the batched post read answers "how many comments"
+  // and is what a moderator watches. See InstagramProvider for the full note.
+  // Static, so they survive however the provider is instantiated per request.
+  private static readonly adPostsCache = new MetaAdsCache<SocialCommentPost[]>(
+    15 * 60 * 1000
+  );
+  private static readonly adWalkCache = new MetaAdsCache<MetaAdsResult>(
+    60 * 60 * 1000
+  );
+
   private static toCommentPost(post: any, isAd = false): SocialCommentPost {
     return {
       id: String(post.id),
@@ -936,11 +950,29 @@ export class FacebookProvider extends SocialAbstract implements SocialProvider {
     accessToken: string,
     userToken: string
   ): Promise<SocialCommentPost[]> {
-    const ads = await fetchMetaAds(
-      userToken,
-      ['effective_object_story_id'],
-      (url) => this.fetch(url, {}, 'fetch ads')
+    // Cached on the slower clock — see adWalkCache. Blocking, because this is
+    // already inside adPostsCache's background refresh: returning early with no
+    // ads would cache an empty list as if it were an answer.
+    const walk = await FacebookProvider.adWalkCache.readBlocking(
+      `facebook:${pageId}`,
+      () =>
+        fetchMetaAds(userToken, ['effective_object_story_id'], (url) =>
+          this.fetch(url, {}, 'fetch ads')
+        )
     );
+
+    if (!walk.value) {
+      throw new Error('facebook ad walk failed');
+    }
+
+    const { ads, accounts, unreadable } = walk.value;
+
+    if (unreadable.length) {
+      console.warn(
+        `[facebook] ad walk incomplete: ${unreadable.length} of ${accounts.length} discovered ad accounts or account edges could not be read`,
+        unreadable.slice(0, 5)
+      );
+    }
 
     // Only this Page's ads: one ad account commonly promotes several Pages, and
     // a story id is `<page-id>_<post-id>`.
@@ -959,31 +991,39 @@ export class FacebookProvider extends SocialAbstract implements SocialProvider {
     // Batched node read, with the PAGE token — reading a page post needs the
     // page permissions, not the ads one. Graph caps `ids` at 50 and is atomic,
     // so chunk it; a failed chunk costs those cards, not the whole listing.
+    // Bounded, not `Promise.all`: a year of ads runs to thousands of posts, and
+    // firing every batch at once is how you earn a rate limit.
     const posts: Record<string, any> = Object.assign(
       {},
-      ...(await Promise.all(
-        chunk(ids, 50).map((batch) =>
-          this.fetch(
-            `https://graph.facebook.com/v20.0/?ids=${batch.join(',')}&fields=${
-              FacebookProvider.POST_FIELDS
-            }&access_token=${accessToken}`,
-            {},
-            'fetch ad posts'
-          )
-            .then((response) => response.json())
-            .catch(() => ({}))
+      ...(await mapLimit(chunk(ids, 50), 8, (batch) =>
+        this.fetch(
+          `https://graph.facebook.com/v20.0/?ids=${batch.join(',')}&fields=${
+            FacebookProvider.POST_FIELDS
+          }&access_token=${accessToken}`,
+          {},
+          'fetch ad posts'
         )
+          .then((response) => response.json())
+          .catch(() => ({}))
       ))
     );
 
-    return ids.map((postId) => {
+    return ids.flatMap((postId) => {
       const found = posts?.[postId];
       if (found?.id) {
+        // This is a comment screen, and an ad with no comments is not something
+        // anyone can act on — on the live account they outnumber the actionable
+        // ones better than ten to one. The count refreshes on the fast clock, so
+        // a newly commented ad appears here within minutes.
+        if (!Number(found.comments?.summary?.total_count || 0)) {
+          return [];
+        }
+
         return FacebookProvider.toCommentPost(found, true);
       }
 
       // Dark posts can refuse a direct node read while their comments edge
-      // still works, so keep the card rather than dropping the post.
+      // still works, so the count is unknown rather than zero — keep the card.
       const ad = byPost.get(postId);
       return {
         id: postId,
@@ -1019,25 +1059,28 @@ export class FacebookProvider extends SocialAbstract implements SocialProvider {
     const userToken = integration?.refreshToken || '';
     const wantsAds = !cursor && !!userToken;
 
-    const [response, adPosts] = await Promise.all([
+    const [response, ads] = await Promise.all([
       this.fetch(
         `https://graph.facebook.com/v20.0/${id}/posts?${params.toString()}`,
         {},
         'fetch comment posts'
       ).then((postsResponse) => postsResponse.json()),
       wantsAds
-        ? this.fetchAdPosts(id, accessToken, userToken).catch(() => {
-            // No ads_management, or an ad account we cannot read. Degrade to the
-            // organic list rather than failing the screen — and swallow
-            // RefreshToken too: handleErrors treats any body containing '490'
-            // as an expired token and fbtrace_ids contain '490' by chance, so
-            // letting this optional branch report token death would randomly
-            // flag a healthy channel as needing reconnection. The /posts call
-            // beside it is the authority on whether the token is alive.
-            return [] as SocialCommentPost[];
-          })
-        : ([] as SocialCommentPost[]),
+        ? // Cached and bounded: an exhaustive walk across a business's ad
+          // accounts is far slower than a screen load can absorb. A failed walk
+          // (no ads_management, or an ad account we cannot read) degrades to the
+          // organic list — including RefreshToken, because handleErrors treats
+          // any body containing '490' as an expired token and fbtrace_ids
+          // contain '490' by chance, so letting this optional branch report
+          // token death would randomly flag a healthy channel as needing
+          // reconnection. The /posts call beside it is the authority on that.
+          FacebookProvider.adPostsCache.read(`facebook:${id}`, () =>
+            this.fetchAdPosts(id, accessToken, userToken)
+          )
+        : { value: [] as SocialCommentPost[], complete: true },
     ]);
+
+    const adPosts = ads.value || [];
 
     const organic = (response.data || []).map((post: any) =>
       FacebookProvider.toCommentPost(post)
@@ -1068,6 +1111,9 @@ export class FacebookProvider extends SocialAbstract implements SocialProvider {
       limit: safeLimit,
       hasMore: !!next,
       next,
+      // The first walk for a large business outlives the request that started
+      // it. Say so, rather than letting an ad-less list imply there are no ads.
+      ...(ads.complete ? {} : { syncing: true }),
     };
   }
 

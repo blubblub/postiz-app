@@ -97,7 +97,82 @@ hide needed no work: both Meta providers ignore `postId` and act on the comment
 id alone, so the whole feature was a *listing* problem.
 
 Both Meta providers discover ads the same way, through `meta.ads.ts`:
-`/me/adaccounts` → `/act_*/ads` → the creative id that platform needs.
+ad accounts → `/act_*/ads` → the creative id that platform needs.
+
+**`/me/adaccounts` is not the inventory.** It returns only the accounts the user
+is *directly assigned* to. Accounts owned by a Business Manager — where an
+organisation's real advertising lives — come off `/me/businesses` →
+`owned_ad_accounts` / `client_ad_accounts`. On the live account: 8 vs 49
+reachable, and every account actually running ads was in the 41 the simple edge
+omits, hiding 7,549 ad media with ~975 comments in one month. The union of all
+three edges is walked, de-duplicated.
+
+Both edges are then paged to exhaustion. `/act_*/ads` returns ads in no useful
+order — `sort` and `date_preset` are accepted and silently ignored there
+(verified live) — so a first page is an arbitrary slice, not the newest, which
+is why decade-old ads used to fill the screen. Some accounts answer a wide
+`fields` set at a large `limit` with *"Please reduce the amount of data you're
+asking for"* (code 1); the page size halves and retries rather than losing the
+account.
+
+**The walk is bounded by ad creation date, not by count** (`AD_HISTORY_DAYS`,
+one year, applied as `filtering=[{"field":"ad.created_time",…}]` — the only
+bound this edge honours). Ads are never deleted, so unbounded is not a stable
+target. Measured on the live account:
+
+| Window | Ads | Distinct IG media | Time |
+|---|---:|---:|---:|
+| unbounded | 54,201 | 24,875 | 322s |
+| 365 days | 2,752 | 2,517 | 61s |
+| 90 days | 2,273 | 2,148 | 57s |
+
+A year costs almost nothing over 90 days, and both contain ads created the same
+day. The bound is on `MetaAdsResult.since` — a *stated* limit, unlike the silent
+five-account cap it replaces.
+
+Even bounded, the walk is ~60s, far past what a screen load can wait for, so
+`meta.ads.cache.ts` runs it in the background and serves the last completed walk.
+A cold cache waits 8s and then returns without the ads, flagging `syncing: true`
+so the screen says "still syncing" instead of implying there are none; a stale
+cache is served instantly while the refresh runs behind it. A failed walk never
+overwrites a good one, and cools down for a minute instead of restarting on
+every load.
+
+**Two clocks, because the two halves change at different rates and cost
+different amounts.** The Marketing API walk answers *which ads exist* — ~110
+requests, ~60s, new ads a few times a day — and is cached for **an hour**
+(`adWalkCache`, read with `readBlocking`). That TTL is a rate-limit budget, not
+a freshness preference: the API meters per ad account on a decaying score, and
+15 minutes was frequent enough to exhaust the Business Manager edge holding most
+of the accounts, which is how two consecutive live runs found 49 and 35.
+
+The batched `?ids=` node read answers *how many comments* — ~60 requests, ~17s —
+and that is the number a moderator watches, so it is cached for only **15
+minutes** (`adMediaCache`). The screen itself never polls: `revalidateOnFocus`
+is off and `refreshInterval` is 0 once posts exist, so reopening the screen is
+the refresh, and it must not be answered from an hour-old count.
+
+**Ad posts with zero comments are not listed.** A year of ads is 3,108 cards on
+the live account and ~240 have ever been commented on; the rest bury them and
+bloat the first page, which carries the entire ad set. A post whose count is
+*unknown* (Graph returned no node — dark posts do this) is kept, because unknown
+is not zero. This is the one deliberately opinionated thing in the feature: flip
+the `comments_count` / `comments.summary.total_count` guard in the two providers
+to undo it.
+
+Throttling carries no distinctive error code here (*"There have been too many
+calls to this ad-account"*), so `isRateLimit` matches on message as well as codes
+4/17/32/613, and `pageAll` backs off 60s×attempt up to three times —
+`MetaAdsThrottle`, mutable so the checks don't sleep. The batched `?ids=` node
+reads are bounded to 8 in flight for the same reason: a year of ads is ~50
+batches and firing them at once earns the limit.
+
+Anything still unreadable — an ad account **or an account-discovery edge** — is
+named in `unreadable` and logged. **A partial answer must never look like a
+complete one**; that failure has now appeared three times here (the
+five-account cap, the first-page-only read, and a `.catch(() => [])` on the
+business edges that turned a throttled discovery into a short account list with
+no error at all).
 
 - **Facebook** — `creative.effective_object_story_id` (a `<page-id>_<post-id>`
   page post), then a batched node read with the **page** token to build the card.
