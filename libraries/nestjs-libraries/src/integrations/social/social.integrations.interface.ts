@@ -81,6 +81,17 @@ export type SocialCommentPost = {
   commentCount?: number;
   likeCount?: number;
   /**
+   * When the newest comment on this post arrived, for sorting by activity
+   * rather than by publish date.
+   *
+   * Optional because not every platform will say cheaply. Instagram returns it
+   * in the media read the listing already does, and TikTok Ads derives posts
+   * from the comments themselves so it comes free. Facebook cannot: reading a
+   * page post's comments edge needs `pages_read_user_content`, which is
+   * declined for this app. Absent means UNKNOWN, never "no comments".
+   */
+  lastCommentDate?: string;
+  /**
    * The post exists only as an ad, or was created by one. Dark posts have no
    * public permalink, so `releaseURL` is usually missing on these.
    */

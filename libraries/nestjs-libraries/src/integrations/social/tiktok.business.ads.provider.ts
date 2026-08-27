@@ -415,6 +415,10 @@ export class TiktokBusinessAdsProvider
             // Never emit an unparseable date: the comment screen formats it and
             // the shared cache would write it into a NOT NULL column.
             publishDate: (createdAt || dayjs()).toISOString(),
+            // The ads surface never exposes when a post was published, so both
+            // dates are the newest comment here. Saying so lets the screen sort
+            // by activity without pretending the two are different.
+            lastCommentDate: (createdAt || dayjs()).toISOString(),
             thumbnail: row.video_cover_url,
             commentCount: 1,
             likeCount: 0,
@@ -428,6 +432,7 @@ export class TiktokBusinessAdsProvider
         // comment happened to come back first.
         if (createdAt && createdAt.toISOString() > existing.publishDate) {
           existing.publishDate = createdAt.toISOString();
+          existing.lastCommentDate = createdAt.toISOString();
         }
       }
     }

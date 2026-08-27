@@ -48,6 +48,12 @@ type CommentPost = {
   thumbnail?: string;
   commentCount?: number;
   likeCount?: number;
+  /**
+   * When the newest comment arrived. Absent means the channel cannot say —
+   * Facebook needs a permission this app was declined — not that there are
+   * none, so sorting by it must not treat absent as "oldest".
+   */
+  lastCommentDate?: string;
   /** The post is an ad (often a dark post with no public permalink). */
   isAd?: boolean;
   integration?: {
@@ -314,6 +320,9 @@ export const SocialComments = () => {
   const [currentIntegrationId, setCurrentIntegrationId] = useState('');
   const [selectedPostId, setSelectedPostId] = useState('');
   const [posts, setPosts] = useState<CommentPost[]>([]);
+  const [postSort, setPostSort] = useState<'publishDate' | 'lastCommentDate'>(
+    'publishDate'
+  );
   const [nextPostCursor, setNextPostCursor] = useState<string | undefined>();
   const [loadingMorePosts, setLoadingMorePosts] = useState(false);
   const [comments, setComments] = useState<SocialComment[]>([]);
@@ -390,6 +399,7 @@ export const SocialComments = () => {
   useEffect(() => {
     setSelectedPostId('');
     setPosts([]);
+    setPostSort('publishDate');
     setNextPostCursor(undefined);
     setComments([]);
     setNextCommentCursor(undefined);
@@ -432,9 +442,40 @@ export const SocialComments = () => {
     setNextPostCursor(postsData?.next);
   }, [postsData]);
 
+  // Only offered when the channel actually reports comment dates. Facebook
+  // cannot (it needs pages_read_user_content, declined for this app), and
+  // silently sorting everything by an absent field would just scramble the list.
+  const canSortByLastComment = useMemo(
+    () => posts.some((post) => !!post.lastCommentDate),
+    [posts]
+  );
+
+  useEffect(() => {
+    if (!canSortByLastComment && postSort === 'lastCommentDate') {
+      setPostSort('publishDate');
+    }
+  }, [canSortByLastComment, postSort]);
+
+  const visiblePosts = useMemo(() => {
+    if (postSort !== 'lastCommentDate' || !canSortByLastComment) {
+      return orderBy(posts, ['publishDate'], ['desc']);
+    }
+
+    // Posts nobody has commented on have no activity date, so they belong at
+    // the bottom rather than wherever an empty string happens to sort. Publish
+    // date breaks ties, which is what orders that whole tail.
+    return orderBy(
+      posts,
+      [(post) => post.lastCommentDate || '', 'publishDate'],
+      ['desc', 'desc']
+    );
+  }, [posts, postSort, canSortByLastComment]);
+
   const currentPost = useMemo(() => {
-    return posts.find((post) => post.id === selectedPostId) || posts[0];
-  }, [posts, selectedPostId]);
+    return (
+      visiblePosts.find((post) => post.id === selectedPostId) || visiblePosts[0]
+    );
+  }, [visiblePosts, selectedPostId]);
 
   useEffect(() => {
     if (currentPost && currentPost.id !== selectedPostId) {
@@ -826,16 +867,48 @@ export const SocialComments = () => {
       ) : (
       <div className="flex flex-1 flex-col gap-[16px] bg-newBgColorInner p-[20px] xl:grid xl:grid-cols-[minmax(280px,360px)_1fr]">
         <div className="flex min-h-0 flex-col rounded-[8px] border border-tableBorder bg-newBgColor p-[16px]">
-          <div className="mb-[14px] flex items-center justify-between gap-[12px]">
-            <div className="min-w-0">
-              <div className="text-[20px] font-[600]">
-                {t('posts', 'Posts')}
+          <div className="mb-[14px] flex flex-col gap-[10px]">
+            <div className="flex items-center justify-between gap-[12px]">
+              <div className="min-w-0">
+                <div className="text-[20px] font-[600]">
+                  {t('posts', 'Posts')}
+                </div>
+                <div className="truncate text-[13px] text-textColor/60">
+                  {currentIntegration?.name}
+                </div>
               </div>
-              <div className="truncate text-[13px] text-textColor/60">
-                {currentIntegration?.name}
-              </div>
+              <div className="text-[13px] text-textColor/60">{posts.length}</div>
             </div>
-            <div className="text-[13px] text-textColor/60">{posts.length}</div>
+            <div className="flex items-center gap-[8px]">
+              <label
+                htmlFor="post-sort"
+                className="shrink-0 text-[13px] text-textColor/60"
+              >
+                {t('sort_by', 'Sort by')}
+              </label>
+              <select
+                id="post-sort"
+                value={postSort}
+                onChange={(event) =>
+                  setPostSort(
+                    event.target.value as 'publishDate' | 'lastCommentDate'
+                  )
+                }
+                className="h-[34px] min-w-0 flex-1 rounded-[8px] border border-newTableBorder bg-newBgColorInner px-[10px] text-[13px] text-textColor"
+              >
+                <option value="publishDate">
+                  {t('sort_post_date', 'Post date')}
+                </option>
+                <option value="lastCommentDate" disabled={!canSortByLastComment}>
+                  {canSortByLastComment
+                    ? t('sort_last_comment', 'Last comment')
+                    : t(
+                        'sort_last_comment_unavailable',
+                        'Last comment (not available here)'
+                      )}
+                </option>
+              </select>
+            </div>
           </div>
           {postsLoading && (
             <div className="flex flex-1 items-center justify-center">
@@ -874,7 +947,7 @@ export const SocialComments = () => {
             onScroll={handlePostsScroll}
             className="flex min-h-0 flex-1 flex-col gap-[10px] overflow-y-auto"
           >
-            {posts.map((post) => (
+            {visiblePosts.map((post) => (
               <button
                 key={post.id}
                 type="button"
@@ -908,6 +981,14 @@ export const SocialComments = () => {
                     </span>
                   )}
                   <span>{formatDate(post.publishDate)}</span>
+                  {postSort === 'lastCommentDate' && !!post.lastCommentDate && (
+                    // Otherwise the order looks arbitrary: the date on the card
+                    // is the publish date, which is not what it is sorted by.
+                    <span className="text-textColor/80">
+                      {t('last_comment', 'Last comment')}{' '}
+                      {formatDate(post.lastCommentDate)}
+                    </span>
+                  )}
                   {typeof post.likeCount === 'number' && (
                     <span>{post.likeCount} likes</span>
                   )}

@@ -231,6 +231,10 @@ const q = (url: string, name: string) =>
       'postId is <adgroup>:<item>, newest first'
     );
     assert.strictEqual(page.posts[0].commentCount, 2, 'comments counted per item');
+    assert.ok(page.posts[0].lastCommentDate,
+      'lastCommentDate is free here: posts are derived from the comments themselves');
+    assert.ok(page.posts[0].lastCommentDate >= page.posts[1].lastCommentDate,
+      'newest activity first — item1 has a later comment than item2');
     assert.strictEqual(page.posts[0].isAd, true, 'every post here is an ad');
     assert.strictEqual(page.posts[0].thumbnail, 'https://cover/1.jpg');
     assert.strictEqual(page.posts[0].content, 'Buy the thing');

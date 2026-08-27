@@ -105,6 +105,8 @@ const stub = (routes: Record<string, any>) => {
     assert.deepStrictEqual(r.posts.map((x: any) => x.id), ['P_dark1', 'o1'], 'ads merge, newest first');
     assert.strictEqual(r.posts[0].isAd, true);
     assert.strictEqual(r.posts[1].isAd, undefined);
+    assert.strictEqual(r.posts[0].lastCommentDate, undefined,
+      'Facebook cannot read a post\'s comments edge, so lastCommentDate stays absent');
     assert.strictEqual(r.next, 'ORG1', 'cursor is the plain /posts cursor');
     assert.ok(!calls.some((c) => c.includes('ads_posts')),
       'ads_posts needs pages_manage_ads and must not be called');
@@ -189,6 +191,44 @@ const stub = (routes: Record<string, any>) => {
   assert.strictEqual(r.posts[0].releaseURL, 'https://ig/1',
     'creative permalink survives a readable media node without its own permalink');
   assert.strictEqual(r.posts[1].isAd, undefined);
+
+  // ---- lastCommentDate rides along in the media read, it is not a second round-trip
+  {
+    const seen: string[] = [];
+    resetAdCaches();
+    ig.fetch = async (url: string) => {
+      seen.push(url);
+      if (url.includes('/media?')) return { json: async () => page([{
+        id: 'm_old', timestamp: '2026-08-01T00:00:00+0000', caption: 'old post',
+        comments_count: 2,
+        comments: { data: [{ timestamp: '2026-08-20T12:00:00+0000' }] },
+      }]) } as any;
+      if (url.includes('me/businesses')) return { json: async () => ({ data: [] }) } as any;
+      if (url.includes('adaccounts')) return { json: async () => ({ data: [{ id: 'act_1' }] }) } as any;
+      if (url.includes('act_1/ads')) return { json: async () => ({ data: [{
+        name: 'Ad', created_time: '2026-08-10T00:00:00+0000',
+        creative: { effective_instagram_media_id: 'ig_new' },
+      }] }) } as any;
+      if (url.includes('?ids=')) return { json: async () => ({
+        ig_new: {
+          id: 'ig_new', caption: 'ad', timestamp: '2026-08-10T00:00:00+0000',
+          comments_count: 1,
+          comments: { data: [{ timestamp: '2026-08-25T09:00:00+0000' }] },
+        },
+      }) } as any;
+      throw new Error('unstubbed ' + url);
+    };
+    r = await ig.fetchCommentPosts('IG', 'pageTok___userTok', {} as any, 30);
+    const decoded = seen.map((u) => decodeURIComponent(u));
+    assert.ok(decoded.some((u) => u.includes('/media?') && u.includes('comments.limit(1)')),
+      'organic media must ask for comments.limit(1) so lastCommentDate is free');
+    assert.ok(decoded.some((u) => u.includes('?ids=') && u.includes('comments.limit(1)')),
+      'the batched ad-media read must ask for it too');
+    assert.strictEqual(r.posts.find((p: any) => p.id === 'm_old')?.lastCommentDate,
+      '2026-08-20T12:00:00+0000');
+    assert.strictEqual(r.posts.find((p: any) => p.id === 'ig_new')?.lastCommentDate,
+      '2026-08-25T09:00:00+0000');
+  }
 
   calls.length = 0;
   ig.fetch = stub({ '/media?': page([{ id: 'm2', timestamp: '2026-01-01T00:00:00+0000' }]) });

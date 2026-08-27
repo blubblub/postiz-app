@@ -1021,6 +1021,21 @@ export class InstagramProvider
     'id,caption,media_type,media_url,thumbnail_url,permalink,timestamp,comments_count,like_count';
 
   /**
+   * The newest comment's timestamp, so the screen can sort by activity rather
+   * than publish date.
+   *
+   * Instagram's comments edge is newest-first by default, so `limit(1)` is the
+   * most recent one — verified live against a media with 416 comments, and it
+   * survives the batched `?ids=` read the ad listing uses.
+   *
+   * Kept apart from MEDIA_FIELDS because it is only requested on the
+   * graph.facebook.com host. instagram-standalone talks to the Instagram Login
+   * API, where this is unverified, and a bad field there would fail the whole
+   * media read rather than just this one column.
+   */
+  private static readonly LAST_COMMENT_FIELD = 'comments.limit(1){timestamp}';
+
+  /**
    * Two clocks, because the two halves of an ad listing change at very
    * different rates and cost very different amounts.
    *
@@ -1054,6 +1069,9 @@ export class InstagramProvider
       thumbnail: post.thumbnail_url || post.media_url,
       commentCount: Number(post.comments_count || 0),
       likeCount: Number(post.like_count || 0),
+      ...(post?.comments?.data?.[0]?.timestamp
+        ? { lastCommentDate: post.comments.data[0].timestamp }
+        : {}),
       ...(isAd ? { isAd: true } : {}),
     };
   }
@@ -1129,7 +1147,9 @@ export class InstagramProvider
         this.fetch(
           `https://graph.facebook.com/v20.0/?ids=${batch.join(
             ','
-          )}&fields=${InstagramProvider.MEDIA_FIELDS}&access_token=${userToken}`,
+          )}&fields=${encodeURIComponent(
+            `${InstagramProvider.MEDIA_FIELDS},${InstagramProvider.LAST_COMMENT_FIELD}`
+          )}&access_token=${userToken}`,
           {},
           'fetch ad media'
         )
@@ -1194,7 +1214,10 @@ export class InstagramProvider
     const safeLimit = Math.min(Math.max(Number(limit) || 25, 1), 100);
     const params = new URLSearchParams({
       access_token: accessToken,
-      fields: InstagramProvider.MEDIA_FIELDS,
+      fields:
+        type === 'graph.facebook.com'
+          ? `${InstagramProvider.MEDIA_FIELDS},${InstagramProvider.LAST_COMMENT_FIELD}`
+          : InstagramProvider.MEDIA_FIELDS,
       limit: String(safeLimit),
     });
     if (cursor) {
