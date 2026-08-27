@@ -326,19 +326,24 @@ export async function fetchMetaAds(
     ])
   );
 
+  const adsUrl = (accountId: string, limit: number) =>
+    `${GRAPH}/${accountId}/ads` +
+    `?fields=${encodeURIComponent(fields)}` +
+    `&filtering=${filtering}` +
+    `&limit=${limit}&access_token=${userToken}`;
+
+  const readAccount = async (accountId: string) =>
+    (await pageAllWithBackoff(
+      (limit) => adsUrl(accountId, limit),
+      doFetch
+    )) as MetaAd[];
+
   const perAccount = await mapLimit(
     accounts,
     ACCOUNT_CONCURRENCY,
     async (account) => {
       try {
-        return (await pageAllWithBackoff(
-          (limit) =>
-            `${GRAPH}/${account.id}/ads` +
-            `?fields=${encodeURIComponent(fields)}` +
-            `&filtering=${filtering}` +
-            `&limit=${limit}&access_token=${userToken}`,
-          doFetch
-        )) as MetaAd[];
+        return await readAccount(account.id);
       } catch (err: any) {
         // One ad account the user can list but not read must not take the other
         // accounts' ads down with it — a common agency setup. Meta answers that
@@ -354,6 +359,25 @@ export async function fetchMetaAds(
       }
     }
   );
+
+  // A concurrent walk of dozens of accounts regularly gets "Unknown Error" on
+  // a handful that answer fine a moment later on their own. Retry those
+  // serially before freezing the short list in the cache.
+  for (let i = 0; i < accounts.length; i++) {
+    const miss = unreadable.findIndex((row) => row.id === accounts[i].id);
+    if (miss < 0) {
+      continue;
+    }
+    try {
+      perAccount[i] = await readAccount(accounts[i].id);
+      unreadable.splice(miss, 1);
+    } catch (err: any) {
+      unreadable[miss] = {
+        id: accounts[i].id,
+        reason: err?.graphError?.message || err?.message || unreadable[miss].reason,
+      };
+    }
+  }
 
   return { ads: perAccount.flat(), accounts, unreadable, since };
 }

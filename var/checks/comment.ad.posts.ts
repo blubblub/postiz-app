@@ -265,6 +265,37 @@ const stub = (routes: Record<string, any>) => {
   assert.deepStrictEqual(r.posts.map((p: any) => p.id), ['ig_ad_4'],
     'one unreadable ad account is skipped, and must not disconnect the channel');
 
+  // ---- a transient Unknown Error during the concurrent walk is retried
+  {
+    resetAdCaches();
+    let adsCalls = 0;
+    ig.fetch = async (url: string) => {
+      if (url.includes('/media?')) return { json: async () => page([], undefined, false) } as any;
+      if (url.includes('/me/adaccounts')) return { json: async () => ({ data: [{ id: 'act_flaky' }] }) } as any;
+      if (url.includes('/me/businesses')) return { json: async () => ({ data: [] }) } as any;
+      if (url.includes('act_flaky/ads')) {
+        adsCalls++;
+        if (adsCalls === 1) {
+          throw Object.assign(new Error('Unknown Error'), {
+            graphError: { message: 'Unknown Error' },
+          });
+        }
+        return { json: async () => ({ data: [{ name: 'Recovered', created_time: '2026-08-01T00:00:00+0000',
+          creative: { effective_instagram_media_id: 'ig_rec' } }] }) } as any;
+      }
+      if (url.includes('?ids=')) return { json: async () => ({
+        ig_rec: { id: 'ig_rec', caption: 'back', timestamp: '2026-08-01T00:00:00+0000', comments_count: 1 },
+      }) } as any;
+      throw new Error('unstubbed ' + url);
+    };
+    r = await ig.fetchCommentPosts('IG', 'pageTok___userTok', {} as any, 30);
+    assert.deepStrictEqual(r.posts.map((p: any) => p.id), ['ig_rec'],
+      'an account that fails once in the concurrent walk is retried serially');
+    assert.strictEqual(adsCalls, 2);
+    assert.strictEqual(r.syncing, undefined,
+      'a walk that recovered on retry is a complete answer');
+  }
+
   // ---- creative belonging to a different IG account is filtered out
   ig.fetch = stub({
     '/media?': page([]),
@@ -695,6 +726,55 @@ const stub = (routes: Record<string, any>) => {
     await cache.read('k', load);
     assert.strictEqual(attempts, attemptsBefore,
       'a failed walk cools down instead of being restarted by every screen load');
+  }
+
+  // ---- an incomplete walk is not frozen for the full TTL, and must not
+  // replace a complete one. This is how 114 of 239 Instagram ads stayed
+  // missing for an hour after three accounts returned Unknown Error.
+  {
+    type Walk = { ads: string[]; unreadable: string[] };
+    const cache = new MetaAdsCache<Walk>(
+      60_000, 100, 0, 100, (walk) => walk.unreadable.length === 0
+    );
+    let n = 0;
+    const load = async (): Promise<Walk> => {
+      n++;
+      return n === 1
+        ? { ads: ['a'], unreadable: ['act_bad'] }
+        : { ads: ['a', 'b'], unreadable: [] };
+    };
+
+    assert.deepStrictEqual((await cache.readBlocking('k', load)).value?.ads, ['a']);
+    assert.strictEqual(n, 1);
+    const second = await cache.readBlocking('k', load);
+    assert.deepStrictEqual(second.value?.ads, ['a', 'b'],
+      'the next load retries instead of serving the short list for the full TTL');
+    assert.strictEqual(n, 2);
+    await cache.readBlocking('k', load);
+    assert.strictEqual(n, 2, 'a complete walk is then held');
+  }
+
+  {
+    type Walk = { ads: string[]; unreadable: string[] };
+    const cache = new MetaAdsCache<Walk>(
+      0, 100, 60_000, 100, (walk) => walk.unreadable.length === 0
+    );
+    let n = 0;
+    const load = async (): Promise<Walk> => {
+      n++;
+      return n === 1
+        ? { ads: ['full'], unreadable: [] }
+        : { ads: ['partial'], unreadable: ['act_bad'] };
+    };
+
+    assert.deepStrictEqual((await cache.readBlocking('k', load)).value?.ads, ['full']);
+    assert.deepStrictEqual((await cache.readBlocking('k', load)).value?.ads, ['full'],
+      'an incomplete walk must not replace ads a complete one already found');
+    assert.strictEqual(n, 2);
+    const before = n;
+    await cache.readBlocking('k', load);
+    assert.strictEqual(n, before,
+      'refusing to overwrite a complete walk cools down like a thrown one');
   }
 
   console.log('ALL CHECKS PASSED');

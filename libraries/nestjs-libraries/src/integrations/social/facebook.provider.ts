@@ -915,11 +915,16 @@ export class FacebookProvider extends SocialAbstract implements SocialProvider {
   // and quota-hungry, while the batched post read answers "how many comments"
   // and is what a moderator watches. See InstagramProvider for the full note.
   // Static, so they survive however the provider is instantiated per request.
-  private static readonly adPostsCache = new MetaAdsCache<SocialCommentPost[]>(
-    15 * 60 * 1000
-  );
+  private static readonly adPostsCache = new MetaAdsCache<{
+    posts: SocialCommentPost[];
+    complete: boolean;
+  }>(15 * 60 * 1000, 8000, 60 * 1000, 100, (listing) => listing.complete);
   private static readonly adWalkCache = new MetaAdsCache<MetaAdsResult>(
-    60 * 60 * 1000
+    60 * 60 * 1000,
+    8000,
+    60 * 1000,
+    100,
+    (walk) => walk.unreadable.length === 0
   );
 
   private static toCommentPost(post: any, isAd = false): SocialCommentPost {
@@ -949,7 +954,7 @@ export class FacebookProvider extends SocialAbstract implements SocialProvider {
     pageId: string,
     accessToken: string,
     userToken: string
-  ): Promise<SocialCommentPost[]> {
+  ): Promise<{ posts: SocialCommentPost[]; complete: boolean }> {
     // Cached on the slower clock — see adWalkCache. Blocking, because this is
     // already inside adPostsCache's background refresh: returning early with no
     // ads would cache an empty list as if it were an answer.
@@ -983,7 +988,7 @@ export class FacebookProvider extends SocialAbstract implements SocialProvider {
     );
 
     if (!byPost.size) {
-      return [];
+      return { posts: [], complete: unreadable.length === 0 };
     }
 
     const ids = [...byPost.keys()];
@@ -1008,7 +1013,8 @@ export class FacebookProvider extends SocialAbstract implements SocialProvider {
       ))
     );
 
-    return ids.flatMap((postId) => {
+    return {
+      posts: ids.flatMap((postId) => {
       const found = posts?.[postId];
       if (found?.id) {
         // This is a comment screen, and an ad with no comments is not something
@@ -1032,7 +1038,9 @@ export class FacebookProvider extends SocialAbstract implements SocialProvider {
         publishDate: ad?.created_time || new Date().toISOString(),
         isAd: true,
       };
-    });
+      }),
+      complete: unreadable.length === 0,
+    };
   }
 
   async fetchCommentPosts(
@@ -1077,10 +1085,10 @@ export class FacebookProvider extends SocialAbstract implements SocialProvider {
           FacebookProvider.adPostsCache.read(`facebook:${id}`, () =>
             this.fetchAdPosts(id, accessToken, userToken)
           )
-        : { value: [] as SocialCommentPost[], complete: true },
+        : { value: { posts: [] as SocialCommentPost[], complete: true }, complete: true },
     ]);
 
-    const adPosts = ads.value || [];
+    const adPosts = ads.value?.posts || [];
 
     const organic = (response.data || []).map((post: any) =>
       FacebookProvider.toCommentPost(post)
@@ -1113,7 +1121,7 @@ export class FacebookProvider extends SocialAbstract implements SocialProvider {
       next,
       // The first walk for a large business outlives the request that started
       // it. Say so, rather than letting an ad-less list imply there are no ads.
-      ...(ads.complete ? {} : { syncing: true }),
+      ...(ads.complete && ads.value?.complete !== false ? {} : { syncing: true }),
     };
   }
 

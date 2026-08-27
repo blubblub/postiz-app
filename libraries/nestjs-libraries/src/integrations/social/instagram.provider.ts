@@ -1052,11 +1052,16 @@ export class InstagramProvider
    *
    * Static, so they survive however the provider is instantiated per request.
    */
-  private static readonly adMediaCache = new MetaAdsCache<SocialCommentPost[]>(
-    15 * 60 * 1000
-  );
+  private static readonly adMediaCache = new MetaAdsCache<{
+    posts: SocialCommentPost[];
+    complete: boolean;
+  }>(15 * 60 * 1000, 8000, 60 * 1000, 100, (listing) => listing.complete);
   private static readonly adWalkCache = new MetaAdsCache<MetaAdsResult>(
-    60 * 60 * 1000
+    60 * 60 * 1000,
+    8000,
+    60 * 1000,
+    100,
+    (walk) => walk.unreadable.length === 0
   );
 
   private static toCommentPost(post: any, isAd = false): SocialCommentPost {
@@ -1085,7 +1090,7 @@ export class InstagramProvider
   private async fetchAdMedia(
     igUserId: string,
     userToken: string
-  ): Promise<SocialCommentPost[]> {
+  ): Promise<{ posts: SocialCommentPost[]; complete: boolean }> {
     // Cached on the slower clock — see adWalkCache. Blocking, because this is
     // already inside adMediaCache's background refresh: returning early with no
     // ads would cache an empty list as if it were an answer.
@@ -1131,7 +1136,7 @@ export class InstagramProvider
     );
 
     if (!byMediaId.size) {
-      return [];
+      return { posts: [], complete: unreadable.length === 0 };
     }
 
     const ids = [...byMediaId.keys()];
@@ -1158,7 +1163,8 @@ export class InstagramProvider
       ))
     );
 
-    return ids.flatMap((mediaId) => {
+    return {
+      posts: ids.flatMap((mediaId) => {
       const found = media?.[mediaId];
       if (found?.id) {
         // A year of ads is ~3,100 media on the live account and only ~240 of
@@ -1199,7 +1205,9 @@ export class InstagramProvider
             : ad?.created_time,
         isAd: true,
       };
-    });
+      }),
+      complete: unreadable.length === 0,
+    };
   }
 
   async fetchCommentPosts(
@@ -1248,10 +1256,10 @@ export class InstagramProvider
           InstagramProvider.adMediaCache.read(`instagram:${id}`, () =>
             this.fetchAdMedia(id, userToken)
           )
-        : { value: [] as SocialCommentPost[], complete: true },
+        : { value: { posts: [] as SocialCommentPost[], complete: true }, complete: true },
     ]);
 
-    const adPosts = ads.value || [];
+    const adPosts = ads.value?.posts || [];
 
     const organic = (response.data || []).map((post: any) =>
       InstagramProvider.toCommentPost(post)
@@ -1286,7 +1294,7 @@ export class InstagramProvider
       next,
       // The first walk for a large business outlives the request that started
       // it. Say so, rather than letting an ad-less list imply there are no ads.
-      ...(ads.complete ? {} : { syncing: true }),
+      ...(ads.complete && ads.value?.complete !== false ? {} : { syncing: true }),
     };
   }
 

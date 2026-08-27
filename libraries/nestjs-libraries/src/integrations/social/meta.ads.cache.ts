@@ -26,8 +26,10 @@ export type CachedWalk<T> = {
   complete: boolean;
 };
 
+type CacheEntry<T> = { value: T; at: number; ttlMs: number };
+
 export class MetaAdsCache<T> {
-  private readonly entries = new Map<string, { value: T; at: number }>();
+  private readonly entries = new Map<string, CacheEntry<T>>();
   private readonly inFlight = new Map<string, Promise<unknown>>();
   private readonly failedAt = new Map<string, number>();
 
@@ -39,13 +41,19 @@ export class MetaAdsCache<T> {
     /** How long a failed walk is left alone, so a dead token isn't hammered. */
     private readonly cooldownMs = 60 * 1000,
     /** Bound on retained walks — one entry per connected channel. */
-    private readonly maxEntries = 100
+    private readonly maxEntries = 100,
+    /**
+     * Incomplete values (an ad walk that could not read every account) are
+     * still served, but only for `cooldownMs`, and they must not replace a
+     * complete one. The hour-long TTL is for a finished walk, not a partial.
+     */
+    private readonly isComplete?: (value: T) => boolean
   ) {}
 
   async read(key: string, load: () => Promise<T>): Promise<CachedWalk<T>> {
     const entry = this.entries.get(key);
 
-    if (entry && Date.now() - entry.at < this.ttlMs) {
+    if (entry && this.isFresh(entry)) {
       return { value: entry.value, complete: true };
     }
 
@@ -80,7 +88,7 @@ export class MetaAdsCache<T> {
   ): Promise<CachedWalk<T>> {
     const entry = this.entries.get(key);
 
-    if (entry && Date.now() - entry.at < this.ttlMs) {
+    if (entry && this.isFresh(entry)) {
       return { value: entry.value, complete: true };
     }
 
@@ -124,7 +132,25 @@ export class MetaAdsCache<T> {
     const walk = load()
       .then((value) => {
         this.failedAt.delete(key);
-        this.entries.set(key, { value, at: Date.now() });
+        const complete = !this.isComplete || this.isComplete(value);
+        const existing = this.entries.get(key);
+
+        if (
+          !complete &&
+          existing &&
+          (!this.isComplete || this.isComplete(existing.value))
+        ) {
+          // Same rule as a thrown walk: a partial must not replace ads we
+          // already read in full. Retry after the cooldown.
+          this.failedAt.set(key, Date.now());
+          return;
+        }
+
+        this.entries.set(key, {
+          value,
+          at: Date.now(),
+          ttlMs: complete ? this.ttlMs : this.cooldownMs,
+        });
         this.evict();
       })
       .catch(() => {
@@ -141,6 +167,10 @@ export class MetaAdsCache<T> {
     this.inFlight.set(key, walk);
 
     return walk;
+  }
+
+  private isFresh(entry: CacheEntry<T>): boolean {
+    return Date.now() - entry.at < entry.ttlMs;
   }
 
   private evict(): void {
