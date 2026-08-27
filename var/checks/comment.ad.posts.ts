@@ -267,6 +267,10 @@ const stub = (routes: Record<string, any>) => {
 
   // ---- a transient Unknown Error during the concurrent walk is retried
   {
+    const { MetaAdsThrottle } = await import(
+      '@gitroom/nestjs-libraries/integrations/social/meta.ads'
+    );
+    MetaAdsThrottle.backoffMs = 1;
     resetAdCaches();
     let adsCalls = 0;
     ig.fetch = async (url: string) => {
@@ -570,8 +574,59 @@ const stub = (routes: Record<string, any>) => {
     assert.ok(!isRateLimit(new Error(
       'Please reduce the amount of data you\'re asking for, then retry your request')),
       'an oversized request is not a rate limit — it must halve the page size instead of sleeping');
+    assert.ok(!isRateLimit(Object.assign(new Error(
+      'Please reduce the amount of data you\'re asking for, then retry your request'),
+      { graphError: { code: 1 } })),
+      'code 1 plus reduce-data is still a page-size problem, not a wait');
     assert.ok(!isRateLimit(Object.assign(new Error('nope'), { graphError: { code: 200 } })),
       'a permission error must not be retried as throttling');
+    assert.ok(isRateLimit(new Error('Unknown Error')),
+      'Graph\'s generic Unknown Error is how a busy ad account answers');
+    assert.ok(isRateLimit(Object.assign(new Error('x'), {
+      graphError: { code: 1, message: 'Unknown Error' },
+    })));
+    assert.ok(isRateLimit(Object.assign(new Error('x'), { graphError: { code: 2 } })),
+      'code 2 is a temporary service error and must be waited out');
+    assert.ok(isRateLimit({
+      message: 'Unknown Error',
+      details: [{ json: '{"error":{"code":1,"message":"Unknown Error"}}' }],
+    }), 'BadBody from fetch() carries the Graph JSON in details, not graphError');
+  }
+
+  // ---- Unknown Error on /ads is retried like a throttle, not written off
+  {
+    const { fetchMetaAds, MetaAdsThrottle } = await import(
+      '@gitroom/nestjs-libraries/integrations/social/meta.ads'
+    );
+    MetaAdsThrottle.backoffMs = 1;
+    let attempts = 0;
+    const res = await fetchMetaAds(
+      'tok',
+      ['effective_instagram_media_id'],
+      async (url: string) => {
+        if (url.includes('/me/adaccounts'))
+          return { json: async () => ({ data: [{ id: 'act_1' }] }) } as any;
+        if (url.includes('/me/businesses'))
+          return { json: async () => ({ data: [] }) } as any;
+        if (url.includes('act_1/ads')) {
+          attempts++;
+          if (attempts === 1) {
+            throw Object.assign(new Error('Unknown Error'), {
+              details: [{ json: '{"error":{"code":1,"message":"Unknown Error"}}' }],
+            });
+          }
+          return { json: async () => ({ data: [{
+            name: 'Recovered', created_time: '2026-08-01T00:00:00+0000',
+            creative: { effective_instagram_media_id: 'ig_rec' },
+          }] }) } as any;
+        }
+        throw new Error('unstubbed ' + url);
+      }
+    );
+    assert.strictEqual(attempts, 2,
+      'Unknown Error must be retried on the same account, not recorded as unreadable');
+    assert.deepStrictEqual(res.unreadable, []);
+    assert.strictEqual(res.ads.length, 1);
   }
 
   // ---- THE WALK OUTLIVES THE SCREEN LOAD -------------------------------

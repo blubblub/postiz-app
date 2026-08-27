@@ -168,11 +168,10 @@ async function pageAllWithBackoff(
     try {
       return await pageAll(buildUrl(limit), doFetch);
     } catch (err: any) {
-      const tooMuch =
-        err?.graphError?.code === 1 ||
-        /reduce the amount of data/i.test(err?.message || '');
-
-      if (!tooMuch || limit <= MIN_PAGE_SIZE) {
+      // Code 1 is also Graph's generic "Unknown Error", which is a transient
+      // quota blip — not an oversized page. Only the reduce-data message means
+      // "ask for less"; the rest is retried as throttling in pageAll.
+      if (!isTooMuchData(err) || limit <= MIN_PAGE_SIZE) {
         throw err;
       }
 
@@ -181,17 +180,55 @@ async function pageAllWithBackoff(
   }
 }
 
+function graphErrorOf(
+  err: any
+): { code?: number; message?: string } | undefined {
+  if (err?.graphError) {
+    return err.graphError;
+  }
+  // SocialAbstract.fetch throws BadBody on HTTP 4xx/5xx, with the Graph JSON
+  // in details[0].json — there is no graphError on that object, which is how
+  // "Unknown Error" used to skip the ads-walk backoff and drop the account.
+  const raw = err?.details?.[0]?.json;
+  if (typeof raw !== 'string' || raw[0] !== '{') {
+    return undefined;
+  }
+  try {
+    return JSON.parse(raw)?.error;
+  } catch {
+    return undefined;
+  }
+}
+
+function errorMessage(err: any): string {
+  return graphErrorOf(err)?.message || err?.message || '';
+}
+
+/** Graph refused the page size, not the account — shrink the request, don't wait. */
+export function isTooMuchData(err: any): boolean {
+  return /reduce the amount of data/i.test(errorMessage(err));
+}
+
 /**
  * Meta spells throttling several ways and the ads-specific one carries no
  * distinctive code, so the message is part of the test. 4/17/32 are the app,
- * user and page limits; 613 is the Marketing API's own.
+ * user and page limits; 613 is the Marketing API's own. Code 1/"Unknown Error"
+ * and code 2 are how a busy ad account often answers instead of those — verified
+ * live: three accounts failed a 49-wide walk with that and answered fine alone.
  */
 export function isRateLimit(err: any): boolean {
-  const code = err?.graphError?.code;
+  if (isTooMuchData(err)) {
+    return false;
+  }
+
+  const code = graphErrorOf(err)?.code;
+  const message = errorMessage(err);
 
   return (
-    [4, 17, 32, 613].includes(code) ||
-    /too many calls|request limit reached|rate limit/i.test(err?.message || '')
+    [1, 2, 4, 17, 32, 613].includes(code as number) ||
+    /too many calls|request limit reached|rate limit|unknown error/i.test(
+      message
+    )
   );
 }
 
@@ -360,21 +397,36 @@ export async function fetchMetaAds(
     }
   );
 
-  // A concurrent walk of dozens of accounts regularly gets "Unknown Error" on
-  // a handful that answer fine a moment later on their own. Retry those
-  // serially before freezing the short list in the cache.
-  for (let i = 0; i < accounts.length; i++) {
-    const miss = unreadable.findIndex((row) => row.id === accounts[i].id);
+  // Retry accounts that failed with a transient error, serially, after the
+  // concurrent burst has released quota. Wait one backoff first — retrying in
+  // the same second is how the three live Unknown Errors survived the first
+  // serial pass. Permanent misses (no permission, subcode 33) are not worth
+  // a wait — they will fail again the same way.
+  const missed = accounts
+    .map((account, index) => ({ account, index }))
+    .filter(({ account }) => {
+      const row = unreadable.find((u) => u.id === account.id);
+      return !!row && isRateLimit(new Error(row.reason));
+    });
+
+  if (missed.length) {
+    await new Promise((resolve) =>
+      setTimeout(resolve, MetaAdsThrottle.backoffMs)
+    );
+  }
+
+  for (const { account, index } of missed) {
+    const miss = unreadable.findIndex((row) => row.id === account.id);
     if (miss < 0) {
       continue;
     }
     try {
-      perAccount[i] = await readAccount(accounts[i].id);
+      perAccount[index] = await readAccount(account.id);
       unreadable.splice(miss, 1);
     } catch (err: any) {
       unreadable[miss] = {
-        id: accounts[i].id,
-        reason: err?.graphError?.message || err?.message || unreadable[miss].reason,
+        id: account.id,
+        reason: errorMessage(err) || unreadable[miss].reason,
       };
     }
   }
