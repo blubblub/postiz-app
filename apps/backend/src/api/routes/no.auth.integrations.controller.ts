@@ -134,7 +134,12 @@ export class NoAuthIntegrationsController {
               refresh,
               account.accessToken
             );
-            return res({ ...newAuth, refreshToken: body.refresh });
+            // `refresh` / `body.refresh` is the channel id being reconnected,
+            // not a token. The user token from authenticate() belongs in
+            // refreshToken — Facebook's ads walk reads it from there, and
+            // writing the channel id (or nothing) is how reconnect hid every
+            // ad post on the live page.
+            return res({ ...newAuth, refreshToken: account.accessToken });
           } catch (err: any) {
             return res({
               error: err.message,

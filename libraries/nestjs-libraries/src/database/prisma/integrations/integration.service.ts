@@ -317,6 +317,10 @@ export class IntegrationService {
       name: getIntegrationInformation.name,
       inBetweenSteps: false,
       token: getIntegrationInformation.access_token,
+      // authenticate() stored the user token in `token`. The page token
+      // replaces that; keep the user token in refreshToken so Facebook can
+      // still walk ads (`/me/adaccounts` does not work with a page token).
+      refreshToken: getIntegration.refreshToken || getIntegration.token,
       profile: getIntegrationInformation.username,
     });
 
