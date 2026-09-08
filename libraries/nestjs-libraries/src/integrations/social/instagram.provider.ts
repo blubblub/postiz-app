@@ -1126,6 +1126,115 @@ export class InstagramProvider
   }
 
   /**
+   * Four Graph requests, no more: the media node (user half), its comments
+   * edge with each token half, and the first ad that references it with its
+   * creative spec — enough to tell a variant/identity problem from a token
+   * problem. Ads come from adWalkCache, so they cost nothing extra.
+   */
+  async probeCommentPost(
+    id: string,
+    token: string,
+    integration: Integration,
+    postId: string
+  ): Promise<Record<string, unknown>> {
+    const [accessToken, userToken] = token.split('___');
+    const graph = 'https://graph.facebook.com/v20.0';
+    const read = async (url: string, label: string) => {
+      try {
+        return await (await this.fetch(url, {}, label)).json();
+      } catch (err: any) {
+        return {
+          error: err?.graphError?.message || err?.message || String(err),
+        };
+      }
+    };
+    const commentsUrl = (tok: string) =>
+      `${graph}/${postId}/comments?fields=id,username,timestamp,hidden&limit=100&summary=true&access_token=${tok}`;
+    const summarizeEdge = (edge: any) => ({
+      error: edge?.error,
+      returned: (edge?.data || []).length,
+      hidden: (edge?.data || []).filter((c: any) => c.hidden).length,
+      summaryTotal: edge?.summary?.total_count,
+      hasMore: !!edge?.paging?.next,
+      usernames: (edge?.data || []).map((c: any) => c.username).slice(0, 30),
+    });
+
+    const node = await read(
+      `${graph}/${postId}?fields=id,media_product_type,media_type,timestamp,permalink,comments_count,like_count,is_comment_enabled,owner&access_token=${userToken || accessToken}`,
+      'probe media node'
+    );
+    const viaPageHalf = summarizeEdge(
+      await read(commentsUrl(accessToken), 'probe comments (page half)')
+    );
+    const viaUserHalf = userToken
+      ? summarizeEdge(await read(commentsUrl(userToken), 'probe comments (user half)'))
+      : { skipped: 'no user half' };
+
+    let ads: unknown = { skipped: 'no user half' };
+    let firstAd: unknown = undefined;
+    let actorStats: unknown = undefined;
+    if (userToken) {
+      const walk = await InstagramProvider.adWalkCache.readBlocking(
+        `instagram:${id}`,
+        () =>
+          fetchMetaAds(
+            userToken,
+            [
+              'effective_instagram_media_id',
+              'instagram_permalink_url',
+              'instagram_user_id',
+            ],
+            (url) => this.fetch(url, {}, 'fetch ads')
+          )
+      );
+      const all = walk.value?.ads || [];
+      const mine = all.filter(
+        (ad) =>
+          String(ad?.creative?.effective_instagram_media_id || '') ===
+          String(postId)
+      );
+      ads = mine.map((ad) => ({
+        id: ad.id,
+        name: ad.name,
+        accountId: ad.account_id,
+        createdTime: ad.created_time,
+        instagramUserId: ad.creative?.instagram_user_id,
+        permalink: ad.creative?.instagram_permalink_url,
+      }));
+      if (mine[0]?.id) {
+        firstAd = await read(
+          `${graph}/${mine[0].id}?fields=id,name,status,effective_status,creative{id,instagram_user_id,effective_instagram_media_id,source_instagram_media_id,object_story_spec,asset_feed_spec,degrees_of_freedom_spec}&access_token=${userToken}`,
+          'probe ad creative'
+        );
+      }
+      // Free from the cache: which Instagram identities the channel's ads use.
+      // An actor other than this account is excluded from the post list, so a
+      // large "other" bucket is a lead.
+      const actors = new Map<string, number>();
+      for (const ad of all) {
+        if (!ad?.creative?.effective_instagram_media_id) {
+          continue;
+        }
+        const actor = String(ad.creative?.instagram_user_id || '(inherited)');
+        actors.set(actor, (actors.get(actor) || 0) + 1);
+      }
+      actorStats = {
+        thisAccount: String(id),
+        byInstagramUserId: Object.fromEntries(actors),
+      };
+    }
+
+    return {
+      postId,
+      node,
+      commentsEdge: { viaPageHalf, viaUserHalf },
+      adsReferencingThisMedia: ads,
+      firstAdCreative: firstAd,
+      actorStats,
+    };
+  }
+
+  /**
    * The media behind this account's ads. `/{ig-user-id}/media` structurally
    * never returns ad media — Meta is explicit that its counts "don't include
    * data from ads" — so discovery goes through the Marketing API. See

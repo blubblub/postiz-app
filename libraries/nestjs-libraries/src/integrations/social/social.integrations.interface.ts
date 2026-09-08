@@ -248,6 +248,19 @@ export interface ISocialMediaIntegration {
     accessToken: string,
     integration: Integration
   ): Promise<AdAccountDiagnostics>;
+
+  /**
+   * Diagnostic for one post: what the platform says about it from every angle
+   * the comment screen uses (node read, comments edge per token, the ads that
+   * reference it), so a "count says 7, list says 1" can be pinned to a step.
+   * Bounded to a handful of platform requests. Shape is provider-specific.
+   */
+  probeCommentPost?(
+    id: string,
+    accessToken: string,
+    integration: Integration,
+    postId: string
+  ): Promise<Record<string, unknown>>;
 }
 
 export type PostResponse = {

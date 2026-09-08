@@ -198,6 +198,15 @@ export class IntegrationsController {
     return this._integrationService.fetchAdAccountDiagnostics(org.id, id);
   }
 
+  @Get('/comments/:id/posts/:postId/probe')
+  probeCommentPost(
+    @GetOrgFromRequest() org: Organization,
+    @Param('id') id: string,
+    @Param('postId') postId: string
+  ) {
+    return this._integrationService.probeCommentPost(org.id, id, postId);
+  }
+
   @Get('/comments/:id/all')
   getAllComments(
     @GetOrgFromRequest() org: Organization,

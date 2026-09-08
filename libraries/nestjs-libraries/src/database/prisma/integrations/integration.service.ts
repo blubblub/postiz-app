@@ -545,6 +545,38 @@ export class IntegrationService {
     );
   }
 
+  async probeCommentPost(
+    orgId: string,
+    integration: string,
+    postId: string
+  ): Promise<Record<string, unknown>> {
+    const getIntegration = await this.getIntegrationById(orgId, integration);
+
+    if (!getIntegration) {
+      throw new HttpException('Invalid integration', HttpStatus.NOT_FOUND);
+    }
+
+    this.assertCommentIntegrationEnabled(getIntegration);
+
+    const integrationProvider = this._integrationManager.getSocialIntegration(
+      getIntegration.providerIdentifier
+    );
+
+    if (!integrationProvider.probeCommentPost) {
+      throw new HttpException(
+        'Post probe is not available for this integration',
+        HttpStatus.BAD_REQUEST
+      );
+    }
+
+    return integrationProvider.probeCommentPost(
+      getIntegration.internalId,
+      getIntegration.token,
+      getIntegration,
+      postId
+    );
+  }
+
   // Integrations currently being crawled, so a burst of requests (or infinite
   // scroll) can't start the same crawl several times over.
   private static readonly crawlingCommentPosts = new Set<string>();
