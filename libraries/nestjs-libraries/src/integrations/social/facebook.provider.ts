@@ -2,6 +2,7 @@ import {
   AnalyticsData,
   AuthTokenDetails,
   PostDetails,
+  AdAccountDiagnostics,
   PostResponse,
   SocialComment,
   SocialCommentPost,
@@ -27,6 +28,7 @@ import { Rules } from '@gitroom/nestjs-libraries/chat/rules.description.decorato
 import {
   adsByCreativeId,
   fetchMetaAds,
+  summarizeAdWalk,
   mapLimit,
   MetaAdsResult,
 } from '@gitroom/nestjs-libraries/integrations/social/meta.ads';
@@ -939,6 +941,40 @@ export class FacebookProvider extends SocialAbstract implements SocialProvider {
       likeCount: Number(post.likes?.summary?.total_count || 0),
       ...(isAd ? { isAd: true } : {}),
     };
+  }
+
+  /**
+   * Which ad accounts the stored user token reaches and how many of their ads
+   * point at this Page. Shares adWalkCache with fetchAdPosts, so it costs no
+   * extra walk when the comment screen has run recently.
+   */
+  async adAccountDiagnostics(
+    id: string,
+    accessToken: string,
+    integration: Integration
+  ): Promise<AdAccountDiagnostics> {
+    const userToken = integration?.refreshToken || '';
+    if (!userToken) {
+      throw new Error('No user token is stored for this channel');
+    }
+
+    const walk = await FacebookProvider.adWalkCache.readBlocking(
+      `facebook:${id}`,
+      () =>
+        fetchMetaAds(userToken, ['effective_object_story_id'], (url) =>
+          this.fetch(url, {}, 'fetch ads')
+        )
+    );
+
+    if (!walk.value) {
+      throw new Error('facebook ad walk failed');
+    }
+
+    return summarizeAdWalk(walk.value, (ad) =>
+      String(ad?.creative?.effective_object_story_id || '').startsWith(
+        `${id}_`
+      )
+    );
   }
 
   /**

@@ -1,3 +1,5 @@
+import { AdAccountDiagnostics } from '@gitroom/nestjs-libraries/integrations/social/social.integrations.interface';
+
 /**
  * Discovery of a Meta account's ads, shared by the Facebook and Instagram
  * providers.
@@ -85,7 +87,10 @@ export class MetaAdsThrottle {
 }
 
 export type MetaAd = {
+  id?: string;
   name?: string;
+  /** Numeric ad account id, without the `act_` prefix. */
+  account_id?: string;
   created_time?: string;
   creative?: Record<string, any>;
 };
@@ -352,7 +357,9 @@ export async function fetchMetaAds(
   const { accounts, failed } = await fetchMetaAdAccounts(userToken, doFetch);
   const unreadable = [...failed];
 
-  const fields = `name,created_time,creative{${creativeFields.join(',')}}`;
+  const fields = `id,name,created_time,account_id,creative{${creativeFields.join(
+    ','
+  )}}`;
   // `sort` and `date_preset` are accepted and then ignored on this edge, so the
   // window has to be a filter — verified live, and it is what makes 49 accounts
   // tractable: a long-dormant account answers with 0 rows in under a second
@@ -456,4 +463,67 @@ export function adsByCreativeId(
   }
 
   return byId;
+}
+
+/**
+ * Per-account view of a finished walk, for the ad-accounts diagnostic. An ad
+ * is attributed to its `account_id`; `isMine` says whether it belongs to the
+ * channel being diagnosed (one account commonly promotes several Pages).
+ */
+export function summarizeAdWalk(
+  walk: MetaAdsResult,
+  isMine: (ad: MetaAd) => boolean
+): AdAccountDiagnostics {
+  const normalize = (id: string) => String(id).replace(/^act_/, '');
+  const perAccount = new Map<string, { ads: number; adsForChannel: number }>();
+
+  let adsForChannel = 0;
+  for (const ad of walk.ads) {
+    const mine = isMine(ad);
+    if (mine) {
+      adsForChannel += 1;
+    }
+    const key = ad.account_id ? normalize(ad.account_id) : 'unknown';
+    const row = perAccount.get(key) || { ads: 0, adsForChannel: 0 };
+    row.ads += 1;
+    if (mine) {
+      row.adsForChannel += 1;
+    }
+    perAccount.set(key, row);
+  }
+
+  const accountIds = new Set(walk.accounts.map((a) => normalize(a.id)));
+  const accounts: AdAccountDiagnostics['accounts'] = walk.accounts.map(
+    (account) => {
+      const id = normalize(account.id);
+      const counts = perAccount.get(id) || { ads: 0, adsForChannel: 0 };
+      const failed = walk.unreadable.find((u) => normalize(u.id) === id);
+      return {
+        id,
+        name: account.name,
+        ...counts,
+        ...(failed ? { unreadable: failed.reason } : {}),
+      };
+    }
+  );
+
+  // An ad whose account is not in the discovered list should not happen, but
+  // if it does the count must not silently vanish.
+  for (const [id, counts] of perAccount) {
+    if (!accountIds.has(id)) {
+      accounts.push({ id, ...counts });
+    }
+  }
+
+  return {
+    since: new Date(walk.since * 1000).toISOString(),
+    totalAds: walk.ads.length,
+    adsForChannel,
+    accounts: accounts.sort(
+      (a, b) => b.adsForChannel - a.adsForChannel || b.ads - a.ads
+    ),
+    unreadableEdges: walk.unreadable.filter(
+      (u) => !accountIds.has(normalize(u.id))
+    ),
+  };
 }

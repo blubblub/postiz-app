@@ -190,6 +190,14 @@ export class IntegrationsController {
     );
   }
 
+  @Get('/comments/:id/ad-accounts')
+  getCommentAdAccounts(
+    @GetOrgFromRequest() org: Organization,
+    @Param('id') id: string
+  ) {
+    return this._integrationService.fetchAdAccountDiagnostics(org.id, id);
+  }
+
   @Get('/comments/:id/all')
   getAllComments(
     @GetOrgFromRequest() org: Organization,

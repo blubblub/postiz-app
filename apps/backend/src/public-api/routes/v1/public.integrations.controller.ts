@@ -343,6 +343,15 @@ export class PublicIntegrationsController {
     );
   }
 
+  @Get('/integrations/:id/comment-posts/ad-accounts')
+  async listCommentAdAccounts(
+    @GetOrgFromRequest() org: Organization,
+    @Param('id') id: string
+  ) {
+    Sentry.metrics.count('public_api-request', 1);
+    return this._integrationService.fetchAdAccountDiagnostics(org.id, id);
+  }
+
   @Get('/integrations/:id/comment-posts/:postId/comments')
   async listComments(
     @GetOrgFromRequest() org: Organization,

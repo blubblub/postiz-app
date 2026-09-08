@@ -137,6 +137,29 @@ export type SocialAllCommentsPage = {
   next?: string;
 };
 
+/**
+ * Which ad accounts a channel's stored user token reaches, and how many of
+ * their ads (inside the walk window) belong to this channel. Answers "why is
+ * this ad's comment thread missing": an account absent from the list, or
+ * listed with `unreadable`, contributes no ads and no error otherwise.
+ */
+export type AdAccountDiagnostics = {
+  /** ISO time the ad walk was bounded at (ads created after it). */
+  since: string;
+  totalAds: number;
+  adsForChannel: number;
+  accounts: {
+    id: string;
+    name?: string;
+    ads: number;
+    adsForChannel: number;
+    /** Set when the account was listed but its ads could not be read. */
+    unreadable?: string;
+  }[];
+  /** Account-discovery edges that failed — the account list itself is short. */
+  unreadableEdges: { id: string; reason: string }[];
+};
+
 export type GenerateAuthUrlResponse = {
   url: string;
   codeVerifier: string;
@@ -219,6 +242,12 @@ export interface ISocialMediaIntegration {
     limit?: number,
     cursor?: string
   ): Promise<SocialCommentPostsPage>;
+
+  adAccountDiagnostics?(
+    id: string,
+    accessToken: string,
+    integration: Integration
+  ): Promise<AdAccountDiagnostics>;
 }
 
 export type PostResponse = {

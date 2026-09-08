@@ -10,6 +10,7 @@ import { IntegrationManager } from '@gitroom/nestjs-libraries/integrations/integ
 import {
   AnalyticsData,
   SocialComment,
+  AdAccountDiagnostics,
   SocialAllComment,
   SocialAllCommentsPage,
   SocialCommentPost,
@@ -490,6 +491,58 @@ export class IntegrationService {
       }
       throw e;
     }
+  }
+
+  /**
+   * Diagnostic behind the comment screen: which ad accounts this channel's
+   * token reaches and how many of their ads belong to the channel. An ad whose
+   * account is missing here can never show up in the comment post list.
+   */
+  async fetchAdAccountDiagnostics(
+    orgId: string,
+    integration: string
+  ): Promise<AdAccountDiagnostics> {
+    const getIntegration = await this.getIntegrationById(orgId, integration);
+
+    if (!getIntegration) {
+      throw new HttpException('Invalid integration', HttpStatus.NOT_FOUND);
+    }
+
+    this.assertCommentIntegrationEnabled(getIntegration);
+
+    const integrationProvider = this._integrationManager.getSocialIntegration(
+      getIntegration.providerIdentifier
+    );
+
+    if (!integrationProvider.adAccountDiagnostics) {
+      throw new HttpException(
+        'Ad account diagnostics are not available for this integration',
+        HttpStatus.BAD_REQUEST
+      );
+    }
+
+    if (
+      dayjs(getIntegration?.tokenExpiration).isBefore(dayjs()) ||
+      getIntegration.refreshNeeded
+    ) {
+      const data = await this._refreshIntegrationService.refresh(
+        getIntegration,
+        'ad account diagnostics'
+      );
+      if (!data || !data.accessToken) {
+        throw new HttpException(
+          'Integration needs to be reconnected',
+          HttpStatus.UNAUTHORIZED
+        );
+      }
+      getIntegration.token = data.accessToken;
+    }
+
+    return integrationProvider.adAccountDiagnostics(
+      getIntegration.internalId,
+      getIntegration.token,
+      getIntegration
+    );
   }
 
   // Integrations currently being crawled, so a burst of requests (or infinite

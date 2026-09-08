@@ -1,4 +1,5 @@
 import {
+  AdAccountDiagnostics,
   AnalyticsData,
   AuthTokenDetails,
   PostDetails,
@@ -25,6 +26,7 @@ import { chunk } from 'lodash';
 import {
   adsByCreativeId,
   fetchMetaAds,
+  summarizeAdWalk,
   mapLimit,
   MetaAdsResult,
 } from '@gitroom/nestjs-libraries/integrations/social/meta.ads';
@@ -1079,6 +1081,48 @@ export class InstagramProvider
         : {}),
       ...(isAd ? { isAd: true } : {}),
     };
+  }
+
+  /**
+   * Which ad accounts the stored user token reaches and how many of their ads
+   * carry Instagram media for this account. Shares adWalkCache with
+   * fetchAdMedia, so it costs no extra walk when the screen has run recently.
+   */
+  async adAccountDiagnostics(
+    id: string,
+    token: string,
+    integration: Integration
+  ): Promise<AdAccountDiagnostics> {
+    const [, userToken] = token.split('___');
+    if (!userToken) {
+      throw new Error('No user token is stored for this channel');
+    }
+
+    const walk = await InstagramProvider.adWalkCache.readBlocking(
+      `instagram:${id}`,
+      () =>
+        fetchMetaAds(
+          userToken,
+          [
+            'effective_instagram_media_id',
+            'instagram_permalink_url',
+            'instagram_user_id',
+          ],
+          (url) => this.fetch(url, {}, 'fetch ads')
+        )
+    );
+
+    if (!walk.value) {
+      throw new Error('instagram ad walk failed');
+    }
+
+    return summarizeAdWalk(walk.value, (ad) => {
+      if (!ad?.creative?.effective_instagram_media_id) {
+        return false;
+      }
+      const actor = ad?.creative?.instagram_user_id;
+      return !actor || String(actor) === String(id);
+    });
   }
 
   /**
