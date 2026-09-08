@@ -95,6 +95,32 @@ type CommentsResponse = {
   next?: string;
 };
 
+/** A comment in the channel-wide feed, carrying the post it belongs to. */
+type AllComment = SocialComment & {
+  post: CommentPost & {
+    /** The feed read only the first page of this post's comments. */
+    truncated?: boolean;
+  };
+};
+
+type AllCommentsResponse = {
+  comments: AllComment[];
+  /** Posts whose comments this page covers. */
+  posts: number;
+  /** Posts whose comments could not be read — the feed is missing them. */
+  unreadable: number;
+  syncing?: boolean;
+  hasMore: boolean;
+  next?: string;
+};
+
+const byNewest = <T extends SocialComment>(list: T[]) =>
+  orderBy(
+    list,
+    [(comment) => Date.parse(comment.timestamp || '') || 0],
+    ['desc']
+  );
+
 const stripHtml = (value = '') =>
   value
     .replace(/<[^>]+>/g, ' ')
@@ -122,11 +148,11 @@ const formatDate = (value?: string) => {
   }).format(date);
 };
 
-const addReplyToTree = (
-  list: SocialComment[],
+const addReplyToTree = <T extends SocialComment>(
+  list: T[],
   parentId: string,
   reply: SocialComment
-): SocialComment[] =>
+): T[] =>
   list.map((comment) => {
     if (comment.id === parentId) {
       return { ...comment, replies: [...(comment.replies || []), reply] };
@@ -161,11 +187,16 @@ const shouldLoadMore = (element: HTMLElement) =>
 const CommentThread = ({
   comment,
   depth = 0,
+  post,
+  onOpenPost,
   onReply,
   onHide,
 }: {
   comment: SocialComment;
   depth?: number;
+  /** In the channel-wide feed: the post this comment sits on. */
+  post?: AllComment['post'];
+  onOpenPost?: (post: AllComment['post']) => void;
   onReply: (parentCommentId: string, message: string) => Promise<void>;
   onHide: (commentId: string, hidden: boolean) => Promise<void>;
 }) => {
@@ -218,6 +249,65 @@ const CommentThread = ({
         comment.pending && 'opacity-60'
       )}
     >
+      {!!post && depth === 0 && (
+        <div
+          role="button"
+          tabIndex={0}
+          onClick={() => onOpenPost?.(post)}
+          onKeyDown={(event) => {
+            if (event.key === 'Enter' || event.key === ' ') {
+              event.preventDefault();
+              onOpenPost?.(post);
+            }
+          }}
+          className="mb-[10px] flex cursor-pointer items-center gap-[8px] rounded-[6px] bg-newBgColorInner px-[8px] py-[6px] text-[12px] text-textColor/70 hover:bg-boxHover"
+        >
+          {!!post.thumbnail && (
+            <img
+              src={post.thumbnail}
+              alt=""
+              loading="lazy"
+              onError={(event) => {
+                event.currentTarget.style.display = 'none';
+              }}
+              className="h-[24px] w-[24px] shrink-0 rounded-[4px] object-cover"
+            />
+          )}
+          {post.isAd && (
+            <span className="shrink-0 rounded-[4px] bg-forth/20 px-[5px] py-[1px] text-[10px] font-[500] text-forth">
+              {t('ad', 'Ad')}
+            </span>
+          )}
+          <span className="min-w-0 flex-1 truncate">
+            {shortText(post.content, 90) || t('untitled_post', 'Untitled post')}
+          </span>
+          <span className="shrink-0 text-textColor/50">
+            {formatDate(post.publishDate)}
+          </span>
+          {post.truncated && (
+            <span
+              title={t(
+                'more_comments_on_post_help',
+                'This post has more comments than the feed shows. Open it to see all of them.'
+              )}
+              className="shrink-0 text-textColor/50"
+            >
+              {t('more_comments_on_post', 'More on post')}
+            </span>
+          )}
+          {!!post.releaseURL && (
+            <a
+              href={post.releaseURL}
+              target="_blank"
+              rel="noreferrer"
+              onClick={(event) => event.stopPropagation()}
+              className="shrink-0 text-forth hover:underline"
+            >
+              {t('open', 'Open')}
+            </a>
+          )}
+        </div>
+      )}
       <div className="flex items-start gap-[10px]">
         <div className="flex h-[34px] w-[34px] shrink-0 items-center justify-center rounded-full bg-third text-[13px] font-[600]">
           {(comment.username || '?').slice(0, 1).toUpperCase()}
@@ -337,6 +427,18 @@ export const SocialComments = () => {
   >();
   const [loadingMoreComments, setLoadingMoreComments] = useState(false);
   const [collapseMenu, setCollapseMenu] = useCookie('collapseMenu', '0');
+  // 'all' is one newest-first feed across the channel's posts, 'post' the
+  // per-post thread view. Remembered so a moderator who lives in the feed
+  // doesn't have to switch on every visit.
+  const [commentsView, setCommentsView] = useCookie('commentsView', 'post');
+  const showAll = commentsView === 'all';
+  const [allComments, setAllComments] = useState<AllComment[]>([]);
+  const [nextAllCursor, setNextAllCursor] = useState<string | undefined>();
+  const [loadingMoreAll, setLoadingMoreAll] = useState(false);
+  // How much of the channel the feed covers so far, summed across pages, so
+  // the screen can say what is missing instead of passing off a partial feed
+  // as a complete one.
+  const [allCoverage, setAllCoverage] = useState({ posts: 0, unreadable: 0 });
 
   const loadIntegrations = useCallback(async () => {
     const response = await (await fetch('/integrations/list')).json();
@@ -403,6 +505,9 @@ export const SocialComments = () => {
     setNextPostCursor(undefined);
     setComments([]);
     setNextCommentCursor(undefined);
+    setAllComments([]);
+    setNextAllCursor(undefined);
+    setAllCoverage({ posts: 0, unreadable: 0 });
   }, [currentIntegration?.id]);
 
   const loadPosts = useCallback(async () => {
@@ -501,7 +606,7 @@ export const SocialComments = () => {
     isLoading: commentsLoading,
     mutate: mutateComments,
   } = useSWR<CommentsResponse>(
-    currentIntegration && currentPost
+    currentIntegration && currentPost && !showAll
       ? `social-comments-${currentIntegration.id}-${currentPost.id}`
       : null,
     loadComments,
@@ -530,6 +635,122 @@ export const SocialComments = () => {
     );
     setNextCommentCursor(commentsData?.next);
   }, [commentsData, pendingReplies]);
+
+  const loadAllComments = useCallback(async () => {
+    if (!currentIntegration) {
+      return { comments: [], posts: 0, unreadable: 0, hasMore: false };
+    }
+
+    return (await (
+      await fetch(
+        `/integrations/comments/${currentIntegration.id}/all?limit=30`
+      )
+    ).json()) as AllCommentsResponse;
+  }, [currentIntegration?.id, fetch]);
+
+  const {
+    data: allData,
+    error: allError,
+    isLoading: allLoading,
+    mutate: mutateAll,
+  } = useSWR<AllCommentsResponse>(
+    currentIntegration && showAll
+      ? `social-comments-all-${currentIntegration.id}`
+      : null,
+    loadAllComments,
+    {
+      revalidateOnFocus: false,
+      fallbackData: { comments: [], posts: 0, unreadable: 0, hasMore: false },
+      // Same as the post list: while the first crawl fills the channel the
+      // feed is empty server-side, so poll until something shows up.
+      refreshInterval: (latest) =>
+        latest?.syncing && !latest?.comments?.length ? 15000 : 0,
+    }
+  );
+
+  useEffect(() => {
+    const base = allData?.comments || [];
+    const outstanding = pendingReplies.filter(
+      (item) => !treeHasReply(base, item.parentId, item.reply.text)
+    );
+
+    if (outstanding.length !== pendingReplies.length) {
+      setPendingReplies(outstanding);
+    }
+
+    setAllComments(
+      outstanding.reduce(
+        (acc, item) => addReplyToTree(acc, item.parentId, item.reply),
+        base
+      )
+    );
+    setNextAllCursor(allData?.next);
+    setAllCoverage({
+      posts: allData?.posts || 0,
+      unreadable: allData?.unreadable || 0,
+    });
+  }, [allData, pendingReplies]);
+
+  const loadMoreAll = useCallback(async () => {
+    if (!currentIntegration || !nextAllCursor || loadingMoreAll) {
+      return;
+    }
+
+    setLoadingMoreAll(true);
+    try {
+      const response = (await (
+        await fetch(
+          `/integrations/comments/${
+            currentIntegration.id
+          }/all?limit=30&after=${encodeURIComponent(nextAllCursor)}`
+        )
+      ).json()) as AllCommentsResponse;
+      setAllComments((current) => {
+        const ids = new Set(current.map((comment) => comment.id));
+        // A later page covers older posts but can still carry a newer
+        // comment, so re-sort rather than append.
+        return byNewest([
+          ...current,
+          ...(response.comments || []).filter(
+            (comment) => !ids.has(comment.id)
+          ),
+        ]);
+      });
+      setNextAllCursor(response.next);
+      setAllCoverage((current) => ({
+        posts: current.posts + (response.posts || 0),
+        unreadable: current.unreadable + (response.unreadable || 0),
+      }));
+    } finally {
+      setLoadingMoreAll(false);
+    }
+  }, [currentIntegration?.id, fetch, loadingMoreAll, nextAllCursor]);
+
+  const handleAllScroll = useCallback(
+    (event: UIEvent<HTMLDivElement>) => {
+      if (shouldLoadMore(event.currentTarget)) {
+        loadMoreAll();
+      }
+    },
+    [loadMoreAll]
+  );
+
+  // Jump from a feed entry to its post. The feed is ordered by activity and
+  // covers posts the publish-date list may not have paged to yet, so the post
+  // is added to the list when it is missing — otherwise the selection would
+  // silently fall back to the first post.
+  const openPost = useCallback(
+    (post: CommentPost) => {
+      setPosts((current) =>
+        current.some((item) => item.id === post.id)
+          ? current
+          : orderBy([...current, post], ['publishDate'], ['desc'])
+      );
+      setSelectedPostId(post.id);
+      setCommentsView('post');
+    },
+    [setCommentsView]
+  );
 
   const loadMorePosts = useCallback(async () => {
     if (!currentIntegration || !nextPostCursor || loadingMorePosts) {
@@ -624,8 +845,8 @@ export const SocialComments = () => {
   );
 
   const replyToComment = useCallback(
-    async (parentCommentId: string, message: string) => {
-      if (!currentIntegration || !currentPost) {
+    async (postId: string, parentCommentId: string, message: string) => {
+      if (!currentIntegration || !postId) {
         throw new Error('Missing selected post');
       }
 
@@ -647,7 +868,7 @@ export const SocialComments = () => {
 
       try {
         const response = await fetch(
-          `/integrations/comments/${currentIntegration.id}/posts/${currentPost.id}/replies`,
+          `/integrations/comments/${currentIntegration.id}/posts/${postId}/replies`,
           {
             method: 'POST',
             body: JSON.stringify({ parentCommentId, message }),
@@ -667,7 +888,7 @@ export const SocialComments = () => {
               : item
           )
         );
-        await mutateComments();
+        await (showAll ? mutateAll() : mutateComments());
       } catch (err) {
         // Failed — take it back out so the thread matches the server.
         setPendingReplies((current) =>
@@ -679,20 +900,21 @@ export const SocialComments = () => {
     [
       currentIntegration?.id,
       currentIntegration?.name,
-      currentPost?.id,
       fetch,
+      mutateAll,
       mutateComments,
+      showAll,
     ]
   );
 
   const hideComment = useCallback(
-    async (commentId: string, hidden: boolean) => {
-      if (!currentIntegration || !currentPost) {
+    async (postId: string, commentId: string, hidden: boolean) => {
+      if (!currentIntegration || !postId) {
         throw new Error('Missing selected post');
       }
 
       const response = await fetch(
-        `/integrations/comments/${currentIntegration.id}/posts/${currentPost.id}/hide`,
+        `/integrations/comments/${currentIntegration.id}/posts/${postId}/hide`,
         {
           method: 'POST',
           body: JSON.stringify({ commentId, hidden }),
@@ -703,9 +925,9 @@ export const SocialComments = () => {
         throw new Error('Could not update comment');
       }
 
-      await mutateComments();
+      await (showAll ? mutateAll() : mutateComments());
     },
-    [currentIntegration?.id, currentPost?.id, fetch, mutateComments]
+    [currentIntegration?.id, fetch, mutateAll, mutateComments, showAll]
   );
 
   if (integrationsLoading) {
@@ -947,14 +1169,37 @@ export const SocialComments = () => {
             onScroll={handlePostsScroll}
             className="flex min-h-0 flex-1 flex-col gap-[10px] overflow-y-auto"
           >
+            <button
+              type="button"
+              onClick={() => setCommentsView('all')}
+              className={clsx(
+                'w-full rounded-[8px] border border-tableBorder bg-newBgColorInner p-[12px] text-left transition-colors hover:bg-boxHover',
+                showAll && 'border-forth bg-boxHover'
+              )}
+            >
+              <div className="text-[14px] font-[600]">
+                {t('all_comments', 'All comments')}
+              </div>
+              <div className="mt-[4px] text-[12px] text-textColor/60">
+                {t(
+                  'all_comments_help',
+                  'Every comment on this channel, newest first'
+                )}
+              </div>
+            </button>
             {visiblePosts.map((post) => (
               <button
                 key={post.id}
                 type="button"
-                onClick={() => setSelectedPostId(post.id)}
+                onClick={() => {
+                  setSelectedPostId(post.id);
+                  setCommentsView('post');
+                }}
                 className={clsx(
                   'w-full rounded-[8px] border border-tableBorder bg-newBgColorInner p-[12px] text-left transition-colors hover:bg-boxHover',
-                  currentPost?.id === post.id && 'border-forth bg-boxHover'
+                  !showAll &&
+                    currentPost?.id === post.id &&
+                    'border-forth bg-boxHover'
                 )}
               >
                 <div className="flex gap-[10px]">
@@ -1025,6 +1270,100 @@ export const SocialComments = () => {
             )}
           </div>
         </div>
+        {showAll ? (
+        <div className="flex min-h-0 flex-col rounded-[8px] border border-tableBorder bg-newBgColor p-[16px]">
+          <div className="mb-[14px] flex items-start justify-between gap-[12px]">
+            <div className="min-w-0">
+              <div className="text-[20px] font-[600]">
+                {t('all_comments', 'All comments')}
+              </div>
+              <div className="text-[13px] text-textColor/60">
+                {t('all_comments_coverage', {
+                  defaultValue:
+                    'Newest first, across {{posts}} posts with comments',
+                  posts: allCoverage.posts,
+                })}
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => setCommentsView('post')}
+              className="shrink-0 text-[13px] text-forth hover:underline"
+            >
+              {t('browse_by_post', 'Browse by post')}
+            </button>
+          </div>
+          {allLoading && (
+            <div className="flex flex-1 items-center justify-center">
+              <LoadingComponent />
+            </div>
+          )}
+          {!!allError && (
+            <div className="rounded-[8px] bg-red-500/10 p-[12px] text-[14px] text-red-300">
+              {t('could_not_load_comments', 'Could not load comments')}
+            </div>
+          )}
+          {!allLoading && !allError && allCoverage.unreadable > 0 && (
+            <div className="mb-[12px] rounded-[8px] border border-amber-500/30 bg-amber-500/10 p-[12px] text-[13px] text-textColor/80">
+              {t('all_comments_partial', {
+                defaultValue:
+                  'Comments from {{count}} posts could not be loaded, so this feed is incomplete.',
+                count: allCoverage.unreadable,
+              })}
+            </div>
+          )}
+          {!allLoading && !allError && !allComments.length && (
+            <div className="rounded-[8px] bg-third p-[14px] text-[14px] text-textColor/70">
+              {allData?.syncing ? (
+                <div className="flex items-center gap-[10px]">
+                  <div className="h-[14px] w-[14px] shrink-0 animate-spin rounded-full border-[2px] border-textColor/30 border-t-textColor" />
+                  <span>
+                    {t(
+                      'syncing_posts',
+                      'Syncing posts from the channel. The first sync walks back through the whole history and can take a few minutes.'
+                    )}
+                  </span>
+                </div>
+              ) : (
+                t('no_comments_yet', 'No comments yet.')
+              )}
+            </div>
+          )}
+          <div
+            onScroll={handleAllScroll}
+            className="flex min-h-0 flex-1 flex-col gap-[12px] overflow-y-auto"
+          >
+            {allComments.map((comment) => (
+              <CommentThread
+                key={`${comment.post.id}-${comment.id}`}
+                comment={comment}
+                post={comment.post}
+                onOpenPost={openPost}
+                onReply={(parentCommentId, message) =>
+                  replyToComment(comment.post.id, parentCommentId, message)
+                }
+                onHide={(commentId, hidden) =>
+                  hideComment(comment.post.id, commentId, hidden)
+                }
+              />
+            ))}
+            {loadingMoreAll && (
+              <div className="flex justify-center py-[12px]">
+                <LoadingComponent />
+              </div>
+            )}
+            {!!nextAllCursor && !loadingMoreAll && (
+              <button
+                type="button"
+                onClick={loadMoreAll}
+                className="rounded-[8px] border border-tableBorder bg-newBgColorInner px-[12px] py-[10px] text-[13px] font-[500] text-textColor hover:bg-boxHover"
+              >
+                {t('load_more', 'Load more')}
+              </button>
+            )}
+          </div>
+        </div>
+        ) : (
         <div className="flex min-h-0 flex-col rounded-[8px] border border-tableBorder bg-newBgColor p-[16px]">
           <div className="mb-[14px] flex items-start justify-between gap-[12px]">
             <div className="min-w-0">
@@ -1037,16 +1376,25 @@ export const SocialComments = () => {
                   : t('select_a_post', 'Select a post')}
               </div>
             </div>
-            {!!currentPost?.releaseURL && (
-              <a
-                href={currentPost.releaseURL}
-                target="_blank"
-                rel="noreferrer"
-                className="shrink-0 text-[13px] text-forth hover:underline"
+            <div className="flex shrink-0 flex-col items-end gap-[4px] text-[13px]">
+              <button
+                type="button"
+                onClick={() => setCommentsView('all')}
+                className="text-forth hover:underline"
               >
-                {t('open_post', 'Open post')}
-              </a>
-            )}
+                {t('show_all_comments', 'Show all comments')}
+              </button>
+              {!!currentPost?.releaseURL && (
+                <a
+                  href={currentPost.releaseURL}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="text-forth hover:underline"
+                >
+                  {t('open_post', 'Open post')}
+                </a>
+              )}
+            </div>
           </div>
           {commentsLoading && (
             <div className="flex flex-1 items-center justify-center">
@@ -1074,8 +1422,16 @@ export const SocialComments = () => {
               <CommentThread
                 key={comment.id}
                 comment={comment}
-                onReply={replyToComment}
-                onHide={hideComment}
+                onReply={(parentCommentId, message) =>
+                  replyToComment(
+                    currentPost?.id || '',
+                    parentCommentId,
+                    message
+                  )
+                }
+                onHide={(commentId, hidden) =>
+                  hideComment(currentPost?.id || '', commentId, hidden)
+                }
               />
             ))}
             {loadingMoreComments && (
@@ -1094,6 +1450,7 @@ export const SocialComments = () => {
             )}
           </div>
         </div>
+        )}
       </div>
       )}
     </>

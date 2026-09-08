@@ -190,6 +190,21 @@ export class IntegrationsController {
     );
   }
 
+  @Get('/comments/:id/all')
+  getAllComments(
+    @GetOrgFromRequest() org: Organization,
+    @Param('id') id: string,
+    @Query('limit') limit?: string,
+    @Query('after') after?: string
+  ) {
+    return this._integrationService.fetchAllComments(
+      org.id,
+      id,
+      Number(limit || 30),
+      after
+    );
+  }
+
   @Get('/comments/:id/posts/:postId')
   async getPostComments(
     @GetOrgFromRequest() org: Organization,

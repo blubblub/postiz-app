@@ -109,6 +109,34 @@ export type SocialCommentPostsPage = {
   next?: string;
 };
 
+/** A comment in the channel-wide feed, carrying the post it belongs to. */
+export type SocialAllComment = SocialComment & {
+  post: SocialCommentPost & {
+    /**
+     * The post has more comments than the one page read for the feed, so the
+     * feed does not carry all of them. Opening the post shows the rest.
+     */
+    truncated?: boolean;
+  };
+};
+
+export type SocialAllCommentsPage = {
+  /** Newest first. Replies stay nested under their parent. */
+  comments: SocialAllComment[];
+  /** Posts whose comments were read for this page. */
+  posts: number;
+  /**
+   * Posts whose comments could not be read (platform error, throttling); their
+   * comments are missing from this page. Never zero-filled — a partial feed
+   * must not look like a complete one.
+   */
+  unreadable: number;
+  /** True while a background crawl is still filling the channel's post list. */
+  syncing?: boolean;
+  hasMore: boolean;
+  next?: string;
+};
+
 export type GenerateAuthUrlResponse = {
   url: string;
   codeVerifier: string;

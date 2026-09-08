@@ -10,6 +10,9 @@ import { IntegrationManager } from '@gitroom/nestjs-libraries/integrations/integ
 import {
   AnalyticsData,
   SocialComment,
+  SocialAllComment,
+  SocialAllCommentsPage,
+  SocialCommentPost,
   SocialCommentPostsPage,
   SocialCommentsPage,
   SocialProvider,
@@ -23,7 +26,8 @@ import { RefreshToken } from '@gitroom/nestjs-libraries/integrations/social.abst
 import { IntegrationTimeDto } from '@gitroom/nestjs-libraries/dtos/integrations/integration.time.dto';
 import { UploadFactory } from '@gitroom/nestjs-libraries/upload/upload.factory';
 import { PlugDto } from '@gitroom/nestjs-libraries/dtos/plugs/plug.dto';
-import { difference, uniq } from 'lodash';
+import { difference, orderBy, uniq } from 'lodash';
+import { mapLimit } from '@gitroom/nestjs-libraries/integrations/social/meta.ads';
 import utc from 'dayjs/plugin/utc';
 import { AutopostRepository } from '@gitroom/nestjs-libraries/database/prisma/autopost/autopost.repository';
 import { RefreshIntegrationService } from '@gitroom/nestjs-libraries/integrations/refresh.integration.service';
@@ -1146,6 +1150,141 @@ export class IntegrationService {
       }
     }
     return undefined;
+  }
+
+  /**
+   * One flat, newest-first feed of a channel's comments, so a moderator can
+   * read what just came in without opening posts one by one.
+   *
+   * Built on the two reads the post view already does — a page of posts, then
+   * each post's comments — rather than a new provider method, so hidden-comment
+   * snapshots, token refresh and the TikTok post cache all apply unchanged.
+   *
+   * A posts page can be far bigger than `limit` (Instagram delivers its whole
+   * ad set on the first page) and every post costs a platform request, so the
+   * page is ordered by activity and walked `limit` posts at a time; the cursor
+   * carries both the posts cursor and the offset into that page. Only the first
+   * page of each post's comments is read — a post with more is flagged
+   * `truncated` so the screen can say so instead of implying the feed is
+   * complete.
+   */
+  async fetchAllComments(
+    orgId: string,
+    integration: string,
+    limit = 30,
+    cursor?: string
+  ): Promise<SocialAllCommentsPage> {
+    const position = IntegrationService.decodeAllCommentsCursor(cursor);
+    const page = await this.fetchCommentPosts(
+      orgId,
+      integration,
+      Math.max(limit, 1),
+      position.postsCursor
+    );
+
+    // A post known to have no comments costs a request and returns nothing.
+    // An unknown count is kept — unknown is not zero (dark posts report none).
+    const candidates = orderBy(
+      page.posts.filter((post) => post.commentCount !== 0),
+      [(post) => post.lastCommentDate || '', 'publishDate'],
+      ['desc', 'desc']
+    );
+    const slice = candidates.slice(position.offset, position.offset + limit);
+
+    const read = await mapLimit(
+      slice,
+      IntegrationService.ALL_COMMENTS_CONCURRENCY,
+      async (post: SocialCommentPost) => {
+        try {
+          const result = await this.fetchPostComments(
+            orgId,
+            integration,
+            post.id
+          );
+          return {
+            post: { ...post, truncated: !!result.next },
+            comments: result.comments,
+            failed: false,
+          };
+        } catch (err) {
+          // Named rather than swallowed: the page still answers, but says how
+          // many posts are missing from it.
+          console.error(
+            `[comments] could not read comments for post ${post.id} on integration ${integration}:`,
+            err instanceof Error ? err.message : err
+          );
+          return { post, comments: [], failed: true };
+        }
+      }
+    );
+
+    const comments: SocialAllComment[] = read.flatMap((item) =>
+      item.comments.map((comment) => ({ ...comment, post: item.post }))
+    );
+
+    const nextOffset = position.offset + slice.length;
+    const next =
+      nextOffset < candidates.length
+        ? IntegrationService.encodeAllCommentsCursor({
+            postsCursor: position.postsCursor,
+            offset: nextOffset,
+          })
+        : page.next
+        ? IntegrationService.encodeAllCommentsCursor({
+            postsCursor: page.next,
+            offset: 0,
+          })
+        : undefined;
+
+    return {
+      // Newest first; a comment with no usable date goes last rather than
+      // wherever an empty string happens to sort.
+      comments: orderBy(
+        comments,
+        [(comment) => Date.parse(comment.timestamp || '') || 0],
+        ['desc']
+      ),
+      posts: slice.length,
+      unreadable: read.filter((item) => item.failed).length,
+      syncing: page.syncing,
+      hasMore: !!next,
+      next,
+    };
+  }
+
+  // Posts read in parallel for the channel-wide feed. Meta meters per account
+  // and TikTok fetches replies per comment, so this stays small.
+  private static readonly ALL_COMMENTS_CONCURRENCY = 4;
+
+  private static encodeAllCommentsCursor(position: {
+    postsCursor?: string;
+    offset: number;
+  }): string {
+    return Buffer.from(JSON.stringify(position), 'utf8').toString('base64url');
+  }
+
+  private static decodeAllCommentsCursor(cursor?: string): {
+    postsCursor?: string;
+    offset: number;
+  } {
+    if (!cursor) {
+      return { offset: 0 };
+    }
+
+    try {
+      const parsed = JSON.parse(
+        Buffer.from(cursor, 'base64url').toString('utf8')
+      );
+      return {
+        postsCursor:
+          typeof parsed?.postsCursor === 'string' && parsed.postsCursor
+            ? parsed.postsCursor
+            : undefined,
+        offset: Math.max(Number(parsed?.offset) || 0, 0),
+      };
+    } catch {
+      throw new HttpException('Invalid cursor', HttpStatus.BAD_REQUEST);
+    }
   }
 
   customers(orgId: string) {
