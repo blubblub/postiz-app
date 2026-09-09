@@ -1479,12 +1479,29 @@ export class IntegrationService {
       ? IntegrationService.encodeOrgCursor(nextPosition)
       : undefined;
 
+    // The TikTok ads surface lists a comment once per advertiser that ran the
+    // ad (its id carries the ad id), and a Spark Ad's comments also appear on
+    // the organic channel — so the same words showed up three or four times.
+    // Keep one copy per platform comment id.
+    const seen = new Set<string>();
+    const distinct = orderBy(
+      comments,
+      [(comment) => Date.parse(comment.timestamp || '') || 0],
+      ['desc']
+    ).filter((comment) => {
+      const platform = comment.integration.identifier.startsWith('tiktok')
+        ? 'tiktok'
+        : comment.integration.identifier;
+      const key = `${platform}:${String(comment.id).split(':')[0]}`;
+      if (seen.has(key)) {
+        return false;
+      }
+      seen.add(key);
+      return true;
+    });
+
     return {
-      comments: orderBy(
-        comments,
-        [(comment) => Date.parse(comment.timestamp || '') || 0],
-        ['desc']
-      ),
+      comments: distinct,
       channels: read.map((row) => ({
         id: row.integration.id,
         name: row.integration.name,
