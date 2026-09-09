@@ -30,6 +30,7 @@ type OrgCommentsResponse = {
   hasMore: boolean;
   next?: string;
   cachedAt?: string;
+  building?: boolean;
 };
 
 const PAGE = 10;
@@ -77,6 +78,9 @@ export const AllComments = () => {
       revalidateOnFocus: false,
       revalidateOnReconnect: false,
       fallbackData: empty,
+      // The server reads every channel in the background and answers
+      // `building` until it has; poll until the feed lands.
+      refreshInterval: (latest) => (latest?.building ? 4000 : 0),
     }
   );
 
@@ -91,6 +95,8 @@ export const AllComments = () => {
     }
     setRefreshing(true);
     try {
+      // Kicks off a rebuild; the answer is `building` and polling takes it
+      // from there.
       const fresh = (await (
         await fetch(`/integrations/comments/all?limit=${PAGE}&refresh=1`)
       ).json()) as OrgCommentsResponse;
@@ -99,6 +105,8 @@ export const AllComments = () => {
       setRefreshing(false);
     }
   }, [fetch, mutate, refreshing]);
+
+  const building = !!data?.building;
 
   const loadMore = useCallback(async () => {
     if (!nextCursor || loadingMore) {
@@ -240,7 +248,7 @@ export const AllComments = () => {
             ))}
           </div>
         )}
-        {(isLoading || refreshing) && (
+        {(isLoading || refreshing || building) && (
           <div className="mb-[12px] flex items-center gap-[10px] text-[13px] text-textColor/60">
             <div className="h-[14px] w-[14px] shrink-0 animate-spin rounded-full border-[2px] border-textColor/30 border-t-textColor" />
             {t(
@@ -254,7 +262,7 @@ export const AllComments = () => {
             {t('could_not_load_comments', 'Could not load comments')}
           </div>
         )}
-        {!isLoading && (!!failing.length || partial > 0) && (
+        {!isLoading && !building && (!!failing.length || partial > 0) && (
           <div className="mb-[12px] rounded-[8px] border border-amber-500/30 bg-amber-500/10 p-[12px] text-[13px] text-textColor/80">
             {!!failing.length &&
               t('org_comments_failing', {
@@ -270,7 +278,7 @@ export const AllComments = () => {
               })}
           </div>
         )}
-        {!isLoading && !error && !comments.length && (
+        {!isLoading && !building && !error && !comments.length && (
           <div className="rounded-[8px] bg-third p-[14px] text-[14px] text-textColor/70">
             {syncing
               ? t(

@@ -1359,14 +1359,48 @@ export class IntegrationService {
   ): Promise<OrgCommentsPage> {
     const key = `${orgId}:${limitPerChannel}:${cursor || ''}`;
     const cached = IntegrationService.orgFeedCache.get(key);
-    if (
-      !refresh &&
-      cached &&
-      Date.now() - cached.at < IntegrationService.ORG_FEED_TTL_MS
-    ) {
+    const fresh =
+      cached && Date.now() - cached.at < IntegrationService.ORG_FEED_TTL_MS;
+
+    if (!refresh && cached && fresh) {
       return { ...cached.value, cachedAt: new Date(cached.at).toISOString() };
     }
 
+    // A read across every channel outlives what a browser request (and the
+    // proxy in front of it) will wait for, so it runs detached and the page
+    // polls. A stale-but-present feed is served meanwhile; a refresh, or a
+    // first load, answers `building` until the read lands.
+    if (!IntegrationService.orgFeedBuilding.has(key)) {
+      const build = this.buildOrgComments(orgId, limitPerChannel, cursor)
+        .then((value) => {
+          IntegrationService.orgFeedCache.set(key, { at: Date.now(), value });
+          IntegrationService.pruneOrgFeedCache();
+        })
+        .catch((err) => {
+          console.error('[comments] org feed build failed:', err);
+        })
+        .finally(() => {
+          IntegrationService.orgFeedBuilding.delete(key);
+        });
+      IntegrationService.orgFeedBuilding.set(key, build);
+    }
+
+    if (cached) {
+      return {
+        ...cached.value,
+        cachedAt: new Date(cached.at).toISOString(),
+        building: true,
+      };
+    }
+
+    return { comments: [], channels: [], hasMore: false, building: true };
+  }
+
+  private async buildOrgComments(
+    orgId: string,
+    limitPerChannel: number,
+    cursor?: string
+  ): Promise<OrgCommentsPage> {
     const position = IntegrationService.decodeOrgCursor(cursor);
     const all = await this.getIntegrationsList(orgId);
     const channels = all.filter((integration) => {
@@ -1397,11 +1431,17 @@ export class IntegrationService {
       IntegrationService.ORG_FEED_CHANNEL_CONCURRENCY,
       async (integration: Integration) => {
         try {
-          const page = await this.fetchAllComments(
-            orgId,
-            integration.id,
-            limitPerChannel,
-            position[integration.id] || undefined
+          const page = await IntegrationService.withTimeout(
+            this.fetchAllComments(
+              orgId,
+              integration.id,
+              limitPerChannel,
+              position[integration.id] || undefined
+            ),
+            IntegrationService.ORG_FEED_CHANNEL_TIMEOUT_MS,
+            `channel ${integration.name} took longer than ${
+              IntegrationService.ORG_FEED_CHANNEL_TIMEOUT_MS / 1000
+            }s`
           );
           return { integration, page, error: undefined as string | undefined };
         } catch (err) {
@@ -1439,7 +1479,7 @@ export class IntegrationService {
       ? IntegrationService.encodeOrgCursor(nextPosition)
       : undefined;
 
-    const value: OrgCommentsPage = {
+    return {
       comments: orderBy(
         comments,
         [(comment) => Date.parse(comment.timestamp || '') || 0],
@@ -1458,21 +1498,42 @@ export class IntegrationService {
       hasMore: !!next,
       next,
     };
+  }
 
-    IntegrationService.orgFeedCache.set(key, { at: Date.now(), value });
+  private static withTimeout<T>(
+    work: Promise<T>,
+    ms: number,
+    message: string
+  ): Promise<T> {
+    let timer: NodeJS.Timeout | undefined;
+    const deadline = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error(message)), ms);
+    });
+    return Promise.race([work, deadline]).finally(() => {
+      if (timer) {
+        clearTimeout(timer);
+      }
+    });
+  }
+
+  private static pruneOrgFeedCache() {
     // Bounded: one entry per (org, page) is plenty, and pages beyond the first
     // are rarely revisited.
-    if (IntegrationService.orgFeedCache.size > 200) {
+    while (IntegrationService.orgFeedCache.size > 200) {
       const oldest = [...IntegrationService.orgFeedCache.entries()].sort(
         (a, b) => a[1].at - b[1].at
       )[0];
-      if (oldest) {
-        IntegrationService.orgFeedCache.delete(oldest[0]);
+      if (!oldest) {
+        break;
       }
+      IntegrationService.orgFeedCache.delete(oldest[0]);
     }
-
-    return value;
   }
+
+  private static readonly orgFeedBuilding = new Map<string, Promise<void>>();
+  // A channel that cannot answer inside this is reported, not waited for —
+  // a dozen TikTok channels each fetching replies per comment add up.
+  private static readonly ORG_FEED_CHANNEL_TIMEOUT_MS = 90 * 1000;
 
   private static readonly orgFeedCache = new Map<
     string,
@@ -1481,7 +1542,7 @@ export class IntegrationService {
   private static readonly ORG_FEED_TTL_MS = 5 * 60 * 1000;
   // Channels read at once. Each channel is its own burst of platform requests
   // (posts, then up to four comment reads in flight), so two is plenty.
-  private static readonly ORG_FEED_CHANNEL_CONCURRENCY = 2;
+  private static readonly ORG_FEED_CHANNEL_CONCURRENCY = 4;
 
   private static encodeOrgCursor(position: Record<string, string>): string {
     return Buffer.from(JSON.stringify(position), 'utf8').toString('base64url');

@@ -188,6 +188,12 @@ export type OrgCommentsPage = {
   next?: string;
   /** Set when served from the short server-side cache. */
   cachedAt?: string;
+  /**
+   * True while the feed is being read for the first time (or after a refresh)
+   * and nothing is cached yet: the list is empty because it is not ready, not
+   * because there are no comments. Poll.
+   */
+  building?: boolean;
 };
 
 export type GenerateAuthUrlResponse = {
