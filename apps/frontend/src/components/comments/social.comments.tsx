@@ -181,6 +181,27 @@ const treeHasReply = (
       : false;
   });
 
+// Stable fallbacks: SWR hands `fallbackData` back as `data` whenever the key is
+// null (the other view is off), and an inline literal there is a new object on
+// every render — which the effects below treat as new data, set state, and
+// render again, forever. That loop starved every route transition off this
+// screen.
+const EMPTY_POSTS: PostsResponse = {
+  posts: [],
+  total: 0,
+  page: 0,
+  limit: 25,
+  hasMore: false,
+};
+const EMPTY_INTEGRATIONS: IntegrationItem[] = [];
+const EMPTY_COMMENTS: CommentsResponse = { comments: [] };
+const EMPTY_ALL: AllCommentsResponse = {
+  comments: [],
+  posts: 0,
+  unreadable: 0,
+  hasMore: false,
+};
+
 const shouldLoadMore = (element: HTMLElement) =>
   element.scrollHeight - element.scrollTop - element.clientHeight < 160;
 
@@ -556,7 +577,7 @@ export const SocialComments = () => {
     revalidateOnMount: true,
     refreshWhenHidden: false,
     refreshWhenOffline: false,
-    fallbackData: [],
+    fallbackData: EMPTY_INTEGRATIONS,
   });
 
   const sortedIntegrations = useMemo(
@@ -611,7 +632,7 @@ export const SocialComments = () => {
 
   const loadPosts = useCallback(async () => {
     if (!currentIntegration) {
-      return { posts: [], total: 0, page: 0, limit: 25, hasMore: false };
+      return EMPTY_POSTS;
     }
 
     return (await (
@@ -632,7 +653,7 @@ export const SocialComments = () => {
     loadPosts,
     {
       revalidateOnFocus: false,
-      fallbackData: { posts: [], total: 0, page: 0, limit: 25, hasMore: false },
+      fallbackData: EMPTY_POSTS,
       // While the first crawl is running the list fills in server-side, so poll
       // until something shows up. Only while empty — once there are posts a
       // refetch would reset whatever the user has scrolled through.
@@ -696,7 +717,7 @@ export const SocialComments = () => {
 
   const loadComments = useCallback(async () => {
     if (!currentIntegration || !currentPost) {
-      return { comments: [] };
+      return EMPTY_COMMENTS;
     }
 
     return (await (
@@ -718,7 +739,7 @@ export const SocialComments = () => {
     loadComments,
     {
       revalidateOnFocus: false,
-      fallbackData: { comments: [] },
+      fallbackData: EMPTY_COMMENTS,
     }
   );
 
@@ -744,7 +765,7 @@ export const SocialComments = () => {
 
   const loadAllComments = useCallback(async () => {
     if (!currentIntegration) {
-      return { comments: [], posts: 0, unreadable: 0, hasMore: false };
+      return EMPTY_ALL;
     }
 
     return (await (
@@ -766,7 +787,7 @@ export const SocialComments = () => {
     loadAllComments,
     {
       revalidateOnFocus: false,
-      fallbackData: { comments: [], posts: 0, unreadable: 0, hasMore: false },
+      fallbackData: EMPTY_ALL,
       // Same as the post list: while the first crawl fills the channel the
       // feed is empty server-side, so poll until something shows up.
       refreshInterval: (latest) =>
