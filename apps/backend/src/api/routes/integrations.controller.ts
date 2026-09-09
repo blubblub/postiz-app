@@ -175,6 +175,21 @@ export class IntegrationsController {
     return this._integrationService.updateNameAndUrl(id, name, url);
   }
 
+  @Get('/comments/all')
+  getOrgComments(
+    @GetOrgFromRequest() org: Organization,
+    @Query('limit') limit?: string,
+    @Query('after') after?: string,
+    @Query('refresh') refresh?: string
+  ) {
+    return this._integrationService.fetchOrgComments(
+      org.id,
+      Number(limit || 10),
+      after,
+      refresh === '1' || refresh === 'true'
+    );
+  }
+
   @Get('/comments/:id/posts')
   getCommentPosts(
     @GetOrgFromRequest() org: Organization,

@@ -160,6 +160,36 @@ export type AdAccountDiagnostics = {
   unreadableEdges: { id: string; reason: string }[];
 };
 
+/** A comment in the organization-wide feed: every channel, one timeline. */
+export type OrgComment = SocialAllComment & {
+  integration: {
+    id: string;
+    name: string;
+    identifier: string;
+    picture?: string;
+  };
+};
+
+export type OrgCommentsPage = {
+  /** Newest first across channels. Replies stay nested under their parent. */
+  comments: OrgComment[];
+  /** One row per channel that was read, so a failing channel is visible. */
+  channels: {
+    id: string;
+    name: string;
+    identifier: string;
+    picture?: string;
+    posts: number;
+    unreadable: number;
+    syncing?: boolean;
+    error?: string;
+  }[];
+  hasMore: boolean;
+  next?: string;
+  /** Set when served from the short server-side cache. */
+  cachedAt?: string;
+};
+
 export type GenerateAuthUrlResponse = {
   url: string;
   codeVerifier: string;

@@ -16,7 +16,7 @@ import SafeImage from '@gitroom/react/helpers/safe.image';
 import { useFetch } from '@gitroom/helpers/utils/custom.fetch';
 import { useT } from '@gitroom/react/translation/get.transation.service.client';
 import { Button } from '@gitroom/react/form/button';
-import { useRouter } from 'next/navigation';
+import { useRouter, useSearchParams } from 'next/navigation';
 import useCookie from 'react-use-cookie';
 import { SVGLine } from '@gitroom/frontend/components/launches/launches.component';
 import { LoadingComponent } from '@gitroom/frontend/components/layout/loading';
@@ -39,7 +39,7 @@ type IntegrationItem = {
   refreshNeeded: boolean;
 };
 
-type CommentPost = {
+export type CommentPost = {
   id: string;
   content: string;
   publishDate: string;
@@ -75,7 +75,7 @@ type PostsResponse = {
   next?: string;
 };
 
-type SocialComment = {
+export type SocialComment = {
   id: string;
   text: string;
   username?: string;
@@ -96,7 +96,7 @@ type CommentsResponse = {
 };
 
 /** A comment in the channel-wide feed, carrying the post it belongs to. */
-type AllComment = SocialComment & {
+export type AllComment = SocialComment & {
   post: CommentPost & {
     /** The feed read only the first page of this post's comments. */
     truncated?: boolean;
@@ -127,12 +127,12 @@ const stripHtml = (value = '') =>
     .replace(/\s+/g, ' ')
     .trim();
 
-const shortText = (value: string, max = 150) => {
+export const shortText = (value: string, max = 150) => {
   const clean = stripHtml(value);
   return clean.length > max ? `${clean.slice(0, max).trim()}...` : clean;
 };
 
-const formatDate = (value?: string) => {
+export const formatDate = (value?: string) => {
   if (!value) {
     return '';
   }
@@ -184,23 +184,34 @@ const treeHasReply = (
 const shouldLoadMore = (element: HTMLElement) =>
   element.scrollHeight - element.scrollTop - element.clientHeight < 160;
 
-const CommentThread = ({
+export type CommentChannel = {
+  id: string;
+  name: string;
+  identifier: string;
+  picture?: string;
+};
+
+export const CommentThread = ({
   comment,
   depth = 0,
   post,
+  channel,
   onOpenPost,
   onReply,
   onHide,
 }: {
   comment: SocialComment;
   depth?: number;
-  /** In the channel-wide feed: the post this comment sits on. */
+  /** In a feed: the post this comment sits on. */
   post?: AllComment['post'];
+  /** In the organization-wide feed: the channel the post belongs to. */
+  channel?: CommentChannel;
   onOpenPost?: (post: AllComment['post']) => void;
   onReply: (parentCommentId: string, message: string) => Promise<void>;
   onHide: (commentId: string, hidden: boolean) => Promise<void>;
 }) => {
   const t = useT();
+  const [showPost, setShowPost] = useState(false);
   const [message, setMessage] = useState('');
   const [replying, setReplying] = useState(false);
   const [hiding, setHiding] = useState(false);
@@ -250,61 +261,130 @@ const CommentThread = ({
       )}
     >
       {!!post && depth === 0 && (
-        <div
-          role="button"
-          tabIndex={0}
-          onClick={() => onOpenPost?.(post)}
-          onKeyDown={(event) => {
-            if (event.key === 'Enter' || event.key === ' ') {
-              event.preventDefault();
-              onOpenPost?.(post);
-            }
-          }}
-          className="mb-[10px] flex cursor-pointer items-center gap-[8px] rounded-[6px] bg-newBgColorInner px-[8px] py-[6px] text-[12px] text-textColor/70 hover:bg-boxHover"
-        >
-          {!!post.thumbnail && (
-            <img
-              src={post.thumbnail}
-              alt=""
-              loading="lazy"
-              onError={(event) => {
-                event.currentTarget.style.display = 'none';
-              }}
-              className="h-[24px] w-[24px] shrink-0 rounded-[4px] object-cover"
-            />
-          )}
-          {post.isAd && (
-            <span className="shrink-0 rounded-[4px] bg-forth/20 px-[5px] py-[1px] text-[10px] font-[500] text-forth">
-              {t('ad', 'Ad')}
+        <div className="mb-[10px] rounded-[6px] bg-newBgColorInner text-[12px] text-textColor/70">
+          <div
+            role="button"
+            tabIndex={0}
+            onClick={() => setShowPost((current) => !current)}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter' || event.key === ' ') {
+                event.preventDefault();
+                setShowPost((current) => !current);
+              }
+            }}
+            title={t('show_post', 'Show the post this comment is on')}
+            className="flex cursor-pointer items-center gap-[8px] px-[8px] py-[6px] hover:bg-boxHover"
+          >
+            {!!channel && (
+              <span className="relative shrink-0">
+                <ImageWithFallback
+                  fallbackSrc={`/icons/platforms/${channel.identifier}.png`}
+                  src={channel.picture || `/icons/platforms/${channel.identifier}.png`}
+                  className="rounded-[4px]"
+                  alt={channel.identifier}
+                  width={20}
+                  height={20}
+                />
+                <SafeImage
+                  src={`/icons/platforms/${channel.identifier}.png`}
+                  className="absolute -bottom-[3px] -end-[3px] rounded-[3px] border border-fifth"
+                  alt={channel.identifier}
+                  width={11}
+                  height={11}
+                />
+              </span>
+            )}
+            {!!channel && (
+              <span className="max-w-[140px] shrink-0 truncate font-[500] text-textColor/80">
+                {channel.name}
+              </span>
+            )}
+            {post.isAd && (
+              <span className="shrink-0 rounded-[4px] bg-forth/20 px-[5px] py-[1px] text-[10px] font-[500] text-forth">
+                {t('ad', 'Ad')}
+              </span>
+            )}
+            <span className="min-w-0 flex-1 truncate">
+              {shortText(post.content, 90) || t('untitled_post', 'Untitled post')}
             </span>
-          )}
-          <span className="min-w-0 flex-1 truncate">
-            {shortText(post.content, 90) || t('untitled_post', 'Untitled post')}
-          </span>
-          <span className="shrink-0 text-textColor/50">
-            {formatDate(post.publishDate)}
-          </span>
-          {post.truncated && (
-            <span
-              title={t(
-                'more_comments_on_post_help',
-                'This post has more comments than the feed shows. Open it to see all of them.'
+            <span className="shrink-0 text-textColor/50">
+              {formatDate(post.publishDate)}
+            </span>
+            <svg
+              xmlns="http://www.w3.org/2000/svg"
+              width="10"
+              height="10"
+              viewBox="0 0 10 10"
+              fill="none"
+              className={clsx('shrink-0 transition-transform', showPost && 'rotate-180')}
+            >
+              <path
+                d="M2 3.5L5 6.5L8 3.5"
+                stroke="currentColor"
+                strokeWidth="1.5"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+            </svg>
+          </div>
+          {showPost && (
+            <div className="flex gap-[10px] border-t border-tableBorder px-[8px] py-[8px]">
+              {!!post.thumbnail && (
+                <img
+                  src={post.thumbnail}
+                  alt=""
+                  loading="lazy"
+                  onError={(event) => {
+                    event.currentTarget.style.display = 'none';
+                  }}
+                  className="h-[56px] w-[56px] shrink-0 rounded-[6px] object-cover"
+                />
               )}
-              className="shrink-0 text-textColor/50"
-            >
-              {t('more_comments_on_post', 'More on post')}
-            </span>
-          )}
-          {!!post.releaseURL && (
-            <a
-              href={post.releaseURL}
-              target="_blank"
-              rel="noreferrer"
-              onClick={(event) => event.stopPropagation()}
-              className="shrink-0 text-forth hover:underline"
-            >
-              {t('open', 'Open')}
-            </a>
+              <div className="min-w-0 flex-1">
+                <div className="line-clamp-3 whitespace-pre-wrap break-words text-[13px] leading-[18px] text-textColor">
+                  {shortText(post.content, 300) || t('untitled_post', 'Untitled post')}
+                </div>
+                <div className="mt-[6px] flex flex-wrap items-center gap-x-[10px] gap-y-[4px]">
+                  {!!channel && <span>{channel.name}</span>}
+                  <span>{formatDate(post.publishDate)}</span>
+                  {typeof post.likeCount === 'number' && (
+                    <span>{post.likeCount} likes</span>
+                  )}
+                  {typeof post.commentCount === 'number' && (
+                    <span>{post.commentCount} comments</span>
+                  )}
+                  {post.truncated && (
+                    <span
+                      title={t(
+                        'more_comments_on_post_help',
+                        'This post has more comments than the feed shows. Open it to see all of them.'
+                      )}
+                    >
+                      {t('more_comments_on_post', 'More on post')}
+                    </span>
+                  )}
+                  {!!post.releaseURL && (
+                    <a
+                      href={post.releaseURL}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="text-forth hover:underline"
+                    >
+                      {t('open_post', 'Open post')}
+                    </a>
+                  )}
+                  {!!onOpenPost && (
+                    <button
+                      type="button"
+                      onClick={() => onOpenPost(post)}
+                      className="text-forth hover:underline"
+                    >
+                      {t('browse_in_channel', 'Browse in channel')}
+                    </button>
+                  )}
+                </div>
+              </div>
+            </div>
           )}
         </div>
       )}
@@ -407,6 +487,7 @@ export const SocialComments = () => {
   const fetch = useFetch();
   const t = useT();
   const router = useRouter();
+  const searchParams = useSearchParams();
   const [currentIntegrationId, setCurrentIntegrationId] = useState('');
   const [selectedPostId, setSelectedPostId] = useState('');
   const [posts, setPosts] = useState<CommentPost[]>([]);
@@ -427,11 +508,29 @@ export const SocialComments = () => {
   >();
   const [loadingMoreComments, setLoadingMoreComments] = useState(false);
   const [collapseMenu, setCollapseMenu] = useCookie('collapseMenu', '0');
+  // Deep link from the organization-wide feed: /comments?integration=..&post=..
+  // lands on that post in the per-post view. Applied once; the list is still
+  // paged by publish date, so a post beyond the first page falls back to the
+  // newest one.
+  const linkedIntegration = searchParams?.get('integration') || '';
+  const linkedPost = searchParams?.get('post') || '';
+  const appliedLinkRef = useRef('');
   // 'all' is one newest-first feed across the channel's posts, 'post' the
   // per-post thread view. Remembered so a moderator who lives in the feed
   // doesn't have to switch on every visit.
   const [commentsView, setCommentsView] = useCookie('commentsView', 'post');
   const showAll = commentsView === 'all';
+  useEffect(() => {
+    const link = `${linkedIntegration}:${linkedPost}`;
+    if (!linkedIntegration || appliedLinkRef.current === link) {
+      return;
+    }
+    appliedLinkRef.current = link;
+    setCurrentIntegrationId(linkedIntegration);
+    if (linkedPost) {
+      setCommentsView('post');
+    }
+  }, [linkedIntegration, linkedPost, setCommentsView]);
   const [allComments, setAllComments] = useState<AllComment[]>([]);
   const [nextAllCursor, setNextAllCursor] = useState<string | undefined>();
   const [loadingMoreAll, setLoadingMoreAll] = useState(false);
@@ -545,7 +644,14 @@ export const SocialComments = () => {
   useEffect(() => {
     setPosts(postsData?.posts || []);
     setNextPostCursor(postsData?.next);
-  }, [postsData]);
+    if (
+      linkedPost &&
+      currentIntegration?.id === linkedIntegration &&
+      (postsData?.posts || []).some((post) => post.id === linkedPost)
+    ) {
+      setSelectedPostId(linkedPost);
+    }
+  }, [postsData, linkedPost, linkedIntegration, currentIntegration?.id]);
 
   // Only offered when the channel actually reports comment dates. Facebook
   // cannot (it needs pages_read_user_content, declined for this app), and

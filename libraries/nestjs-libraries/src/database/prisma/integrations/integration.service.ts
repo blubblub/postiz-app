@@ -11,6 +11,8 @@ import {
   AnalyticsData,
   SocialComment,
   AdAccountDiagnostics,
+  OrgComment,
+  OrgCommentsPage,
   SocialAllComment,
   SocialAllCommentsPage,
   SocialCommentPost,
@@ -1335,6 +1337,168 @@ export class IntegrationService {
       hasMore: !!next,
       next,
     };
+  }
+
+  /**
+   * One timeline across every comment-capable channel in the organization —
+   * the "what came in, anywhere" view. Each channel contributes its own
+   * activity-ordered feed (see fetchAllComments); the cursor is a map of
+   * per-channel cursors so channels page independently and a channel that is
+   * exhausted simply drops out.
+   *
+   * Every channel read is platform requests (posts + comments per post), and
+   * the TikTok Business channels alone number over a dozen here, so the result
+   * is held for a few minutes per organization: reopening the page is free,
+   * and `refresh` is an explicit choice, not a side effect of navigation.
+   */
+  async fetchOrgComments(
+    orgId: string,
+    limitPerChannel = 10,
+    cursor?: string,
+    refresh = false
+  ): Promise<OrgCommentsPage> {
+    const key = `${orgId}:${limitPerChannel}:${cursor || ''}`;
+    const cached = IntegrationService.orgFeedCache.get(key);
+    if (
+      !refresh &&
+      cached &&
+      Date.now() - cached.at < IntegrationService.ORG_FEED_TTL_MS
+    ) {
+      return { ...cached.value, cachedAt: new Date(cached.at).toISOString() };
+    }
+
+    const position = IntegrationService.decodeOrgCursor(cursor);
+    const all = await this.getIntegrationsList(orgId);
+    const channels = all.filter((integration) => {
+      if (
+        integration.type !== 'social' ||
+        integration.disabled ||
+        integration.refreshNeeded ||
+        integration.inBetweenSteps
+      ) {
+        return false;
+      }
+      // On a later page only channels that still have a cursor take part.
+      if (cursor && !position[integration.id]) {
+        return false;
+      }
+      try {
+        const provider = this._integrationManager.getSocialIntegration(
+          integration.providerIdentifier
+        );
+        return !!provider?.fetchComments && !!provider?.fetchCommentPosts;
+      } catch {
+        return false;
+      }
+    });
+
+    const read = await mapLimit(
+      channels,
+      IntegrationService.ORG_FEED_CHANNEL_CONCURRENCY,
+      async (integration: Integration) => {
+        try {
+          const page = await this.fetchAllComments(
+            orgId,
+            integration.id,
+            limitPerChannel,
+            position[integration.id] || undefined
+          );
+          return { integration, page, error: undefined as string | undefined };
+        } catch (err) {
+          // One channel down (expired token, throttled platform) must not
+          // take the whole feed with it — it is named in `channels` instead.
+          const message = err instanceof Error ? err.message : String(err);
+          console.error(
+            `[comments] org feed: channel ${integration.id} (${integration.providerIdentifier}) failed:`,
+            message
+          );
+          return { integration, page: undefined, error: message };
+        }
+      }
+    );
+
+    const comments: OrgComment[] = read.flatMap((row) =>
+      (row.page?.comments || []).map((comment) => ({
+        ...comment,
+        integration: {
+          id: row.integration.id,
+          name: row.integration.name,
+          identifier: row.integration.providerIdentifier,
+          picture: row.integration.picture || undefined,
+        },
+      }))
+    );
+
+    const nextPosition: Record<string, string> = {};
+    for (const row of read) {
+      if (row.page?.next) {
+        nextPosition[row.integration.id] = row.page.next;
+      }
+    }
+    const next = Object.keys(nextPosition).length
+      ? IntegrationService.encodeOrgCursor(nextPosition)
+      : undefined;
+
+    const value: OrgCommentsPage = {
+      comments: orderBy(
+        comments,
+        [(comment) => Date.parse(comment.timestamp || '') || 0],
+        ['desc']
+      ),
+      channels: read.map((row) => ({
+        id: row.integration.id,
+        name: row.integration.name,
+        identifier: row.integration.providerIdentifier,
+        picture: row.integration.picture || undefined,
+        posts: row.page?.posts || 0,
+        unreadable: row.page?.unreadable || 0,
+        ...(row.page?.syncing ? { syncing: true } : {}),
+        ...(row.error ? { error: row.error } : {}),
+      })),
+      hasMore: !!next,
+      next,
+    };
+
+    IntegrationService.orgFeedCache.set(key, { at: Date.now(), value });
+    // Bounded: one entry per (org, page) is plenty, and pages beyond the first
+    // are rarely revisited.
+    if (IntegrationService.orgFeedCache.size > 200) {
+      const oldest = [...IntegrationService.orgFeedCache.entries()].sort(
+        (a, b) => a[1].at - b[1].at
+      )[0];
+      if (oldest) {
+        IntegrationService.orgFeedCache.delete(oldest[0]);
+      }
+    }
+
+    return value;
+  }
+
+  private static readonly orgFeedCache = new Map<
+    string,
+    { at: number; value: OrgCommentsPage }
+  >();
+  private static readonly ORG_FEED_TTL_MS = 5 * 60 * 1000;
+  // Channels read at once. Each channel is its own burst of platform requests
+  // (posts, then up to four comment reads in flight), so two is plenty.
+  private static readonly ORG_FEED_CHANNEL_CONCURRENCY = 2;
+
+  private static encodeOrgCursor(position: Record<string, string>): string {
+    return Buffer.from(JSON.stringify(position), 'utf8').toString('base64url');
+  }
+
+  private static decodeOrgCursor(cursor?: string): Record<string, string> {
+    if (!cursor) {
+      return {};
+    }
+    try {
+      const parsed = JSON.parse(
+        Buffer.from(cursor, 'base64url').toString('utf8')
+      );
+      return parsed && typeof parsed === 'object' ? parsed : {};
+    } catch {
+      throw new HttpException('Invalid cursor', HttpStatus.BAD_REQUEST);
+    }
   }
 
   // Posts read in parallel for the channel-wide feed. Meta meters per account

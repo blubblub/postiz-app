@@ -122,6 +122,34 @@ export const useMenuItem = () => {
       path: '/comments',
     },
     {
+      name: t('all_comments', 'All comments'),
+      icon: (
+        <svg
+          xmlns="http://www.w3.org/2000/svg"
+          width="21"
+          height="21"
+          viewBox="0 0 21 21"
+          fill="none"
+        >
+          <path
+            d="M4 5.5C4 4.39543 4.89543 3.5 6 3.5H15C16.1046 3.5 17 4.39543 17 5.5V11C17 12.1046 16.1046 13 15 13H9.5L6 15.5V13C4.89543 13 4 12.1046 4 11V5.5Z"
+            stroke="currentColor"
+            strokeWidth="1.5"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+          <path
+            d="M8 16.5H14.5C15.6046 16.5 16.5 17.3954 16.5 18.5M7.5 6.75H13.5M7.5 9.25H11"
+            stroke="currentColor"
+            strokeWidth="1.5"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+        </svg>
+      ),
+      path: '/all-comments',
+    },
+    {
       name: t('media', 'Media'),
       icon: (
         <svg
