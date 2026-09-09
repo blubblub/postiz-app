@@ -1559,7 +1559,7 @@ export class IntegrationService {
   private static readonly ORG_FEED_TTL_MS = 5 * 60 * 1000;
   // Channels read at once. Each channel is its own burst of platform requests
   // (posts, then up to four comment reads in flight), so two is plenty.
-  private static readonly ORG_FEED_CHANNEL_CONCURRENCY = 4;
+  private static readonly ORG_FEED_CHANNEL_CONCURRENCY = 2;
 
   private static encodeOrgCursor(position: Record<string, string>): string {
     return Buffer.from(JSON.stringify(position), 'utf8').toString('base64url');
